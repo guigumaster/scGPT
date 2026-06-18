@@ -1060,6 +1060,9 @@ class PrototypeContrastiveHead(nn.Module):
     Prototype-based contrastive learning for cell type discrimination.
     Maintains a learnable prototype matrix and EMA-updated prototypes.
     Provides both classification logits and prototype contrastive loss.
+
+    The loss pulls cell embeddings toward their class prototype (EMA) while
+    pushing them away from other class prototypes.
     """
 
     def __init__(
@@ -1075,44 +1078,72 @@ class PrototypeContrastiveHead(nn.Module):
         self.momentum = momentum
         self.temp = temp
 
-        # Learnable prototypes
+        # Learnable prototypes (gradient-updated)
         self.prototypes = nn.Parameter(torch.randn(n_cls, d_model))
         nn.init.xavier_uniform_(self.prototypes)
 
-        # EMA prototypes (not updated by gradient)
-        self.register_buffer("ema_prototypes", self.prototypes.data.clone())
+        # EMA prototypes (momentum-updated, no gradient)
+        self.register_buffer("ema_prototypes", F.normalize(self.prototypes.data.clone(), p=2, dim=1))
+
+        # Running counts for each class (for stable EMA initialization)
+        self.register_buffer("class_counts", torch.zeros(n_cls))
 
     @torch.no_grad()
     def update_ema(self, cell_emb: Tensor, labels: Tensor) -> None:
-        """Update EMA prototypes with current batch cell embeddings."""
+        """
+        Update EMA prototypes with current batch cell embeddings.
+        Uses normalized embeddings for stable updates.
+        """
         cell_emb_norm = F.normalize(cell_emb, p=2, dim=1)
+        batch_size = cell_emb_norm.size(0)
+
+        # One-hot encode labels for efficient batch update
+        labels_one_hot = F.one_hot(labels, num_classes=self.n_cls).float()  # (batch, n_cls)
+
+        # Sum embeddings per class
+        class_emb_sum = torch.mm(labels_one_hot.t(), cell_emb_norm)  # (n_cls, d_model)
+        class_counts = labels_one_hot.sum(dim=0)  # (n_cls,)
+
+        # Update EMA for classes present in this batch
         for c in range(self.n_cls):
-            mask = labels == c
-            if mask.sum() > 0:
-                emb_mean = cell_emb_norm[mask].mean(dim=0)
+            count = class_counts[c].item()
+            if count > 0:
+                emb_mean = class_emb_sum[c] / count
+                emb_mean = F.normalize(emb_mean, p=2, dim=0)
+
+                # Use adaptive momentum for early training (first few updates)
+                effective_momentum = self.momentum
+                if self.class_counts[c] < 10:
+                    # For early updates, use smaller momentum to adapt faster
+                    effective_momentum = max(0.5, self.momentum - 0.2 * (1 - self.class_counts[c] / 10))
+
                 self.ema_prototypes[c] = F.normalize(
-                    self.momentum * self.ema_prototypes[c]
-                    + (1 - self.momentum) * emb_mean,
+                    effective_momentum * self.ema_prototypes[c]
+                    + (1 - effective_momentum) * emb_mean,
                     p=2,
                     dim=0,
                 )
+                self.class_counts[c] += count
 
     def forward(
         self,
         cell_emb: Tensor,
         labels: Optional[Tensor] = None,
-        use_ema: bool = False,
+        use_ema: bool = True,
     ) -> Dict[str, Tensor]:
         """
         Args:
             cell_emb: (batch, d_model) cell embeddings
             labels: (batch,) cell type labels, optional
-            use_ema: whether to use EMA prototypes for inference
+            use_ema: whether to use EMA prototypes for contrastive loss.
+                     Training uses EMA (stable), inference can use either.
 
         Returns:
             dict containing 'proto_logits' and optionally 'loss_proto'
         """
         cell_emb_norm = F.normalize(cell_emb, p=2, dim=1)
+
+        # Use EMA prototypes for stable contrastive learning
         proto = (
             F.normalize(self.ema_prototypes, p=2, dim=1)
             if use_ema
@@ -1125,6 +1156,7 @@ class PrototypeContrastiveHead(nn.Module):
         output = {"proto_logits": logits}
 
         if labels is not None:
+            # Prototype contrastive loss (cross-entropy with prototypes as class centers)
             loss = F.cross_entropy(logits, labels)
             output["loss_proto"] = loss
 

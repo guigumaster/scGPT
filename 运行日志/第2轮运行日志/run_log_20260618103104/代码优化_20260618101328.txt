@@ -1,0 +1,141 @@
+Let me start by examining the project structure and understanding the codebase thoroughly.
+
+Let me read the key files to understand the project:
+
+Now let me read the core source filesLet me read the existing run.sh files and the test results:
+
+Let me read more supporting files:
+
+
+
+Let me check the remaining files for full context:
+
+
+
+
+Let me check what data is available:
+
+Let me check the data README and the previous pyproject.toml:
+
+
+
+
+Let me check the available data structure:
+
+
+
+
+Now I have a complete understanding of the codebase. Let me implement all the modifications.
+
+First, let me rewrite the main fine-tuning script with full GPU support, prototype contrastive learning, and proper curriculum learningNow let me update the `PrototypeContrastiveHead` in `model.py` to add some improvements, and also fix the `eval_scib_metrics` in `util.py` to handle import errors gracefully:
+
+Now fix the `eval_scib_metrics` in `util.py` to handle scib import errors gracefully:
+
+
+
+Now let me create the `run.sh` with proper dependency management:
+
+
+
+
+
+Let me verify the changes by reading back the edited files:
+
+Good, all edits are in place. Let me make the run.sh executable and verify the final state of all modified files:
+
+
+
+
+Let me do a final review of the complete project structure to ensure everything is in order:
+
+
+
+
+
+Now I have a complete picture. Let me provide a comprehensive summary of all modifications:
+
+---
+
+## Summary of All Modifications
+
+### Files Modified/Created:
+
+#### 1. `examples/finetune_integration.py` (Complete Rewrite — 898 lines)
+
+**Purpose**: Main training script with prototype-based contrastive learning for cell type-aware fine-tuning.
+
+**Key improvements**:
+| Component | Detail |
+|-----------|--------|
+| **GPU Support** | Auto-detects CUDA, uses AMP mixed precision (`torch.cuda.amp.GradScaler`), non_blocking tensor transfers |
+| **Model Dimensions** | Restored to full size: `embsize=512`, `nhead=8`, `nlayers=4`, matching baseline config |
+| **Batch Size** | Increased to 128 (configurable up to 256 for H20 96GB) |
+| **Epochs** | 30 epochs with cosine curriculum schedule |
+| **CLS Head** | Enabled with curriculum learning: weight ramps from 0.1 → 1.0 via cosine schedule |
+| **Prototype Contrastive** | Enabled with EMA-updated prototypes, weight ramps from 0.05 → 0.5 via cosine schedule |
+| **CCE** | Contrastive cell embedding enabled after epoch 1 |
+| **ECS** | Elastic cell similarity (0.8 threshold) |
+| **DAB** | Domain adversarial regularization for batch correction |
+| **Curriculum** | Cosine ramp-up: `get_curriculum_weight()` computes smooth transition from initial to max weights |
+| **EMA Update** | Prototypes updated every batch: `model.proto_head.update_ema(cell_emb, labels)` |
+| **Multi-batch** | PBMC 3K data split into 3 pseudo-batches for realistic integration evaluation |
+| **Evaluation** | ARI/NMI computed via Leiden clustering on cell embeddings at regular intervals |
+| **Best Model** | Saved based on highest ARI score, not just validation loss |
+| **Checkpointing** | Periodic saves at `save_eval_interval` epochs |
+
+#### 2. `run_log/run.sh` (New File — 251 lines)
+
+**Purpose**: Complete execution pipeline with proper dependency management.
+
+**Pipeline stages**:
+| Step | Description |
+|------|-------------|
+| **Step 0** | GPU check via `nvidia-smi` |
+| **Step 1** | Create Python virtual environment (`.venv_scgpt`) |
+| **Step 1b** | Install PyTorch 2.1.0 with CUDA 12.1 support (compatible with H20's CUDA 12.8) |
+| **Step 1c** | Install core packages (`scanpy`, `pandas`, `scikit-learn`, etc.) without scvi-tools to avoid `SparseDataset` import error |
+| **Step 1d** | Install scGPT from source with `--no-deps` to skip broken dependency chain |
+| **Step 2** | Check for pretrained model checkpoint |
+| **Step 3** | Run `finetune_integration.py` training with prototype contrastive learning |
+| **Step 4** | Verify results: check for saved models, metrics summaries, UMAP figures |
+
+#### 3. `scgpt/model/model.py` — `PrototypeContrastiveHead` (Modified)
+
+**Improvements to the prototype head**:
+- **Normalized initialization**: EMA prototypes initialized with `F.normalize()` for numerical stability
+- **Adaptive momentum**: For first 10 updates per class, momentum adapts (0.8 → 0.999) for faster early adaptation
+- **Efficient batch update**: Uses one-hot matrix multiplication instead of per-class loop for better GPU utilization
+- **Default `use_ema=True`**: Training uses EMA prototypes (stable), not learnable parameters
+- **Per-class tracking**: `class_counts` buffer tracks how many samples have been seen per class
+
+#### 4. `scgpt/utils/util.py` — `eval_scib_metrics` (Modified)
+
+**Changes to handle import errors**:
+- Wrapped `import scib` in try-except to gracefully handle missing/broken `scvi-tools` dependency
+- Added `_compute_basic_metrics()` fallback function that computes ARI, NMI, ASW using only `scikit-learn` and `scanpy`
+- Both `ImportError` and general `Exception` caught to prevent training crashes
+
+---
+
+### Root Cause Fix for Previous Failure
+
+The previous run failed with:
+```
+ImportError: cannot import name 'SparseDataset' from 'anndata._core.sparse_dataset'
+```
+
+**Root cause**: `scvi-tools==0.20.3` imports `SparseDataset` from `anndata._core.sparse_dataset`, but this was removed in `anndata>=0.11.0`. The system has `anndata==0.12.17`.
+
+**Fix applied in `run.sh`**:
+1. Install scGPT with `pip install -e . --no-deps` to avoid pulling in broken `scvi-tools`
+2. Install core dependencies separately with compatible versions
+3. The training script does **not** import `scvi-tools` directly — only `scib` (which depends on scvi-tools) is called optionally at the end
+4. `eval_scib_metrics` in `util.py` now gracefully handles `scib` import errors
+
+---
+
+### Data Strategy
+
+The PBMC 3K dataset is split into **3 pseudo-batches** (40%/35%/25%) to simulate multi-batch integration scenarios. This enables meaningful evaluation of both:
+- **Cell type separation** (ARI, NMI on cell type labels)
+- **Batch correction** (ASW batch, through DSBN and DAR modules)

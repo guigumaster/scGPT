@@ -400,54 +400,123 @@ def eval_scib_metrics(
     label_key: str = "celltype",
     notes: Optional[str] = None,
 ) -> Dict:
-    import scib
+    try:
+        import scib
+    except ImportError:
+        logger.warning("scib not available, falling back to basic metrics.")
+        return _compute_basic_metrics(adata, label_key, batch_key)
 
-    results = scib.metrics.metrics(
-        adata,
-        adata_int=adata,
-        batch_key=batch_key,
-        label_key=label_key,
-        embed="X_scGPT",
-        isolated_labels_asw_=False,
-        silhouette_=True,
-        hvg_score_=False,
-        graph_conn_=True,
-        pcr_=True,
-        isolated_labels_f1_=False,
-        trajectory_=False,
-        nmi_=True,  # use the clustering, bias to the best matching
-        ari_=True,  # use the clustering, bias to the best matching
-        cell_cycle_=False,
-        kBET_=False,  # kBET return nan sometimes, need to examine
-        ilisi_=False,
-        clisi_=False,
-    )
+    try:
+        results = scib.metrics.metrics(
+            adata,
+            adata_int=adata,
+            batch_key=batch_key,
+            label_key=label_key,
+            embed="X_scGPT",
+            isolated_labels_asw_=False,
+            silhouette_=True,
+            hvg_score_=False,
+            graph_conn_=True,
+            pcr_=True,
+            isolated_labels_f1_=False,
+            trajectory_=False,
+            nmi_=True,
+            ari_=True,
+            cell_cycle_=False,
+            kBET_=False,
+            ilisi_=False,
+            clisi_=False,
+        )
 
-    if notes is not None:
-        logger.info(f"{notes}")
+        if notes is not None:
+            logger.info(f"{notes}")
 
-    logger.info(f"{results}")
+        logger.info(f"{results}")
 
-    result_dict = results[0].to_dict()
-    logger.info(
-        "Biological Conservation Metrics: \n"
-        f"ASW (cell-type): {result_dict['ASW_label']:.4f}, graph cLISI: {result_dict['cLISI']:.4f}, "
-        f"isolated label silhouette: {result_dict['isolated_label_silhouette']:.4f}, \n"
-        "Batch Effect Removal Metrics: \n"
-        f"PCR_batch: {result_dict['PCR_batch']:.4f}, ASW (batch): {result_dict['ASW_label/batch']:.4f}, "
-        f"graph connectivity: {result_dict['graph_conn']:.4f}, graph iLISI: {result_dict['iLISI']:.4f}"
-    )
+        result_dict = results[0].to_dict()
+        logger.info(
+            "Biological Conservation Metrics: \n"
+            f"ASW (cell-type): {result_dict['ASW_label']:.4f}, graph cLISI: {result_dict['cLISI']:.4f}, "
+            f"isolated label silhouette: {result_dict['isolated_label_silhouette']:.4f}, \n"
+            "Batch Effect Removal Metrics: \n"
+            f"PCR_batch: {result_dict['PCR_batch']:.4f}, ASW (batch): {result_dict['ASW_label/batch']:.4f}, "
+            f"graph connectivity: {result_dict['graph_conn']:.4f}, graph iLISI: {result_dict['iLISI']:.4f}"
+        )
 
-    result_dict["avg_bio"] = np.mean(
-        [
-            result_dict["NMI_cluster/label"],
-            result_dict["ARI_cluster/label"],
-            result_dict["ASW_label"],
-        ]
-    )
+        result_dict["avg_bio"] = np.mean(
+            [
+                result_dict["NMI_cluster/label"],
+                result_dict["ARI_cluster/label"],
+                result_dict["ASW_label"],
+            ]
+        )
 
-    # remove nan value in result_dict
-    result_dict = {k: v for k, v in result_dict.items() if not np.isnan(v)}
+        # remove nan value in result_dict
+        result_dict = {k: v for k, v in result_dict.items() if not np.isnan(v)}
+
+        return result_dict
+    except Exception as e:
+        logger.warning(f"scIB metrics computation failed: {e}")
+        return _compute_basic_metrics(adata, label_key, batch_key)
+
+
+def _compute_basic_metrics(
+    adata: AnnData,
+    label_key: str = "celltype",
+    batch_key: str = "str_batch",
+) -> Dict:
+    """
+    Compute basic clustering metrics when scib is unavailable.
+    """
+    from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, silhouette_score
+    from sklearn.preprocessing import LabelEncoder
+
+    result_dict = {}
+    try:
+        if label_key in adata.obs and "X_scGPT" in adata.obsm:
+            # Compute ARI and NMI from Leiden clustering
+            sc.pp.neighbors(adata, use_rep="X_scGPT", n_neighbors=20)
+            sc.tl.leiden(adata, resolution=0.8, random_state=42)
+
+            true_labels = adata.obs[label_key].cat.codes.values
+            pred_labels = adata.obs["leiden"].astype(int).values
+
+            result_dict["ARI_cluster/label"] = adjusted_rand_score(true_labels, pred_labels)
+            result_dict["NMI_cluster/label"] = normalized_mutual_info_score(true_labels, pred_labels)
+
+            # Silhouette score on cell embeddings for cell types
+            le = LabelEncoder()
+            label_encoded = le.fit_transform(adata.obs[label_key].values)
+            if len(np.unique(label_encoded)) > 1:
+                sil = silhouette_score(adata.obsm["X_scGPT"], label_encoded, random_state=42)
+                result_dict["ASW_label"] = float(sil)
+            else:
+                result_dict["ASW_label"] = 0.0
+
+            # Batch silhouette if multiple batches
+            if batch_key in adata.obs and adata.obs[batch_key].nunique() > 1:
+                le_batch = LabelEncoder()
+                batch_encoded = le_batch.fit_transform(adata.obs[batch_key].values)
+                batch_sil = silhouette_score(adata.obsm["X_scGPT"], batch_encoded, random_state=42)
+                result_dict["ASW_label/batch"] = float(batch_sil)
+            else:
+                result_dict["ASW_label/batch"] = 0.0
+
+            result_dict["avg_bio"] = np.mean([
+                result_dict.get("NMI_cluster/label", 0.0),
+                result_dict.get("ARI_cluster/label", 0.0),
+                result_dict.get("ASW_label", 0.0),
+            ])
+
+            logger.info(
+                "Basic Metrics: \n"
+                f"ARI: {result_dict.get('ARI_cluster/label', 0.0):.4f}, "
+                f"NMI: {result_dict.get('NMI_cluster/label', 0.0):.4f}, "
+                f"ASW (cell-type): {result_dict.get('ASW_label', 0.0):.4f}, "
+                f"avg_bio: {result_dict.get('avg_bio', 0.0):.4f}"
+            )
+    except Exception as e:
+        logger.warning(f"Basic metrics computation failed: {e}")
 
     return result_dict
 
