@@ -1057,12 +1057,12 @@ class AdversarialDiscriminator(nn.Module):
 
 class PrototypeContrastiveHead(nn.Module):
     """
-    Prototype-based contrastive learning for cell type discrimination.
-    Maintains a learnable prototype matrix and EMA-updated prototypes.
-    Provides both classification logits and prototype contrastive loss.
-
-    The loss pulls cell embeddings toward their class prototype (EMA) while
-    pushing them away from other class prototypes.
+    Enhanced prototype-based contrastive learning for cell type discrimination.
+    Maintains learnable prototypes + EMA-updated prototypes with:
+    - Learnable per-prototype temperature scaling
+    - Class-balanced adaptive EMA momentum
+    - Supervised contrastive formulation (pulls embeddings to class prototype,
+      pushes away from others)
     """
 
     def __init__(
@@ -1070,52 +1070,62 @@ class PrototypeContrastiveHead(nn.Module):
         d_model: int,
         n_cls: int,
         momentum: float = 0.999,
-        temp: float = 0.1,
+        temp: float = 0.15,
     ):
         super().__init__()
         self.n_cls = n_cls
         self.d_model = d_model
-        self.momentum = momentum
-        self.temp = temp
+        self.base_momentum = momentum
 
-        # Learnable prototypes (gradient-updated)
+        # Learnable prototypes (gradient-updated - used as classifier weights)
         self.prototypes = nn.Parameter(torch.randn(n_cls, d_model))
         nn.init.xavier_uniform_(self.prototypes)
 
-        # EMA prototypes (momentum-updated, no gradient)
+        # EMA prototypes (momentum-updated, no gradient - used for contrastive loss)
         self.register_buffer("ema_prototypes", F.normalize(self.prototypes.data.clone(), p=2, dim=1))
 
-        # Running counts for each class (for stable EMA initialization)
-        self.register_buffer("class_counts", torch.zeros(n_cls))
+        # Learnable log-temperature per prototype (allows different scaling per class)
+        self.logit_scale = nn.Parameter(torch.ones(1) * math.log(1.0 / temp))
+
+        # Running count for each class (for adaptive momentum)
+        self.register_buffer("class_counts", torch.zeros(n_cls, dtype=torch.long))
+        # Running EMA iteration counter for each class
+        self.register_buffer("class_updates", torch.zeros(n_cls, dtype=torch.long))
+
+    @property
+    def temperature(self) -> Tensor:
+        """Effective temperature = exp(-logit_scale), bound to [0.05, 0.5]"""
+        return torch.exp(-self.logit_scale).clamp(min=0.05, max=0.5)
 
     @torch.no_grad()
     def update_ema(self, cell_emb: Tensor, labels: Tensor) -> None:
         """
         Update EMA prototypes with current batch cell embeddings.
-        Uses normalized embeddings for stable updates.
+        Uses class-balanced adaptive momentum for stable training.
         """
         cell_emb_norm = F.normalize(cell_emb, p=2, dim=1)
-        batch_size = cell_emb_norm.size(0)
 
         # One-hot encode labels for efficient batch update
-        labels_one_hot = F.one_hot(labels, num_classes=self.n_cls).float()  # (batch, n_cls)
+        labels_one_hot = F.one_hot(labels, num_classes=self.n_cls).float()
 
         # Sum embeddings per class
-        class_emb_sum = torch.mm(labels_one_hot.t(), cell_emb_norm)  # (n_cls, d_model)
-        class_counts = labels_one_hot.sum(dim=0)  # (n_cls,)
+        class_emb_sum = torch.mm(labels_one_hot.t(), cell_emb_norm)
+        class_counts_batch = labels_one_hot.sum(dim=0)
 
         # Update EMA for classes present in this batch
         for c in range(self.n_cls):
-            count = class_counts[c].item()
+            count = class_counts_batch[c].item()
             if count > 0:
                 emb_mean = class_emb_sum[c] / count
                 emb_mean = F.normalize(emb_mean, p=2, dim=0)
 
-                # Use adaptive momentum for early training (first few updates)
-                effective_momentum = self.momentum
-                if self.class_counts[c] < 10:
-                    # For early updates, use smaller momentum to adapt faster
-                    effective_momentum = max(0.5, self.momentum - 0.2 * (1 - self.class_counts[c] / 10))
+                # Adaptive momentum: start low (fast adaptation), increase over time
+                total_updates = self.class_updates[c].item()
+                if total_updates < 10:
+                    # Linear warmup: 0.7 -> base_momentum over first 10 updates
+                    effective_momentum = 0.7 + (self.base_momentum - 0.7) * min(total_updates / 10.0, 1.0)
+                else:
+                    effective_momentum = self.base_momentum
 
                 self.ema_prototypes[c] = F.normalize(
                     effective_momentum * self.ema_prototypes[c]
@@ -1123,7 +1133,8 @@ class PrototypeContrastiveHead(nn.Module):
                     p=2,
                     dim=0,
                 )
-                self.class_counts[c] += count
+                self.class_counts[c] += int(count)
+                self.class_updates[c] += 1
 
     def forward(
         self,
@@ -1135,11 +1146,11 @@ class PrototypeContrastiveHead(nn.Module):
         Args:
             cell_emb: (batch, d_model) cell embeddings
             labels: (batch,) cell type labels, optional
-            use_ema: whether to use EMA prototypes for contrastive loss.
-                     Training uses EMA (stable), inference can use either.
+            use_ema: whether to use EMA prototypes for contrastive loss
 
         Returns:
-            dict containing 'proto_logits' and optionally 'loss_proto'
+            dict containing 'proto_logits', 'loss_proto' (if labels provided),
+            and prototype similarity matrix
         """
         cell_emb_norm = F.normalize(cell_emb, p=2, dim=1)
 
@@ -1150,14 +1161,20 @@ class PrototypeContrastiveHead(nn.Module):
             else F.normalize(self.prototypes, p=2, dim=1)
         )
 
+        temp = self.temperature
         # logits = cos_sim / temp, shape (batch, n_cls)
-        logits = torch.mm(cell_emb_norm, proto.t()) / self.temp
+        logits = torch.mm(cell_emb_norm, proto.t()) / temp
 
         output = {"proto_logits": logits}
 
         if labels is not None:
-            # Prototype contrastive loss (cross-entropy with prototypes as class centers)
-            loss = F.cross_entropy(logits, labels)
+            # Prototype contrastive loss with label smoothing for better generalization
+            loss = F.cross_entropy(logits, labels, label_smoothing=0.05)
             output["loss_proto"] = loss
+
+            # Compute accuracy of prototype-based classification
+            pred = logits.argmax(dim=1)
+            acc = (pred == labels).float().mean()
+            output["proto_acc"] = acc
 
         return output

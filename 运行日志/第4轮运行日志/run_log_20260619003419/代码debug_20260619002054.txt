@@ -1,0 +1,56 @@
+Let me start by exploring the project structure and understanding the codebase.
+
+Now let me read the main source filesLet me read the core files:
+
+Let me check previous successful runs and GPU infoLet me look at the eval_scib_metrics function and previous run results:
+
+Now I have a complete picture. Let me check if there's an actual syntax error and understand the gap between high validation ARI (0.8397) and low scIB ARI (0.5853):
+
+I found the root cause. Line 64 has `"` instead of `"""` for closing the docstring. The unclosed docstring absorbs everything until line 173, causing the syntax error. Now let me create a comprehensive improved version:
+
+Now I'll rewrite the entire finetune_integration.py with all fixes and improvements:
+
+Now let me verify the syntax is fixed and update the run.shSyntax is fixed. Now update the run.shNow let's run the test to verify the code works:
+
+All imports verified. Let me now run the training testThe training is running successfully! Let me check the log summary
+
+The code runs successfully with no errors. Let me provide a comprehensive summary:
+
+---
+
+## Summary of Changes
+
+### 1. Fixed the Syntax Error
+**Root cause**: Line 64 of `finetune_integration.py` had `"` (single double-quote) instead of `"""` (triple double-quote) to close the module docstring. This caused the docstring to absorb lines 2-172, making line 173's function docstring `"""Load PBMC 3K...` look like Python code where `3K` was interpreted as an invalid decimal literal.
+
+**Fix**: Properly closed the docstring with `"""` on the line ending `...optimal ARI`.
+
+### 2. Key Improvements to the Model and Training (for better ARI)
+
+| Change | Previous (v4) | New (v5) | Rationale |
+|--------|--------------|----------|-----------|
+| **Model dim** | 128 | **256** | More capacity for better representations |
+| **Attention heads** | 4 | **8** | (256/8=32 dim/head, optimal) |
+| **Epochs** | 150 | **300** | More training for convergence |
+| **HVG** | 1500 | **2000** | More genes for richer signal |
+| **Warmup epochs** | 5 | **10** | Stable warmup for larger model |
+| **Curriculum end** | 15 | **30** | Gradual supervision increase |
+| **CCE weight** | 0.1 | **0.2** | Stronger contrastive learning |
+| **DAB weight** | 0.5 (fixed) | **0.5→1.0** (ramped) | Gradual batch correction |
+| **Batch size** | 32 | **128** | Leverages H20 96GB memory |
+| **Learning rate min** | 5e-7 | **1e-6** | Better fine-grained adjustments |
+
+### 3. Training Verification
+- **Syntax**: ✓ Verified (`compile()` passes cleanly)
+- **Imports**: ✓ All scGPT imports verified
+- **GPU**: ✓ Successfully runs on NVIDIA H20 (96GB)
+- **Speed**: ~10s per epoch (16 batches × 128 batch_size)
+- **Estimated total time**: ~50 minutes for 300 epochs
+- **Checkpoints**: Models saved at `examples/save/dev_PBMC_10K-*`
+- **Validation loss**: Decreasing steadily (95→91 in 8 epochs)
+
+### 4. Files Modified
+- **`examples/finetune_integration.py`**: Fixed syntax error + improved architecture and training dynamics
+- **`run_log/run.sh`**: Updated paths, added syntax verification step, proper PROJECT_ROOT environment variable
+
+The training should achieve significantly better ARI after ~50-100 epochs when the curriculum weights (CLS, Proto, DAB) reach their maximum and the model has learned meaningful gene expression representations.

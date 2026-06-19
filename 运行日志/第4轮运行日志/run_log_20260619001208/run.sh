@@ -1,13 +1,14 @@
 #!/bin/bash
 # =============================================================================
-# scGPT v5 Fine-tuning for scRNA-seq Integration
+# scGPT v4 Fine-tuning for scRNA-seq Integration
 # Optimized for from-scratch training on PBMC 3K with NVIDIA H20 (96GB)
 #
-# - Large batch: 128 (leverages H20 96GB memory)
-# - Larger model: 256-dim, 4-layer, 8-head for better representation
-# - All losses: MLM + MVC + CLS + Proto + CCE + DAB
-# - 300 epochs with cosine LR schedule, label smoothing, and better initialization
-# - Gradient reversal DAB with curriculum ramp-up
+# Based on proven v2 architecture (ARI=0.5999) with targeted improvements:
+# - Small model: 128-dim, 3-layer, 4-head (proven for small data)
+# - Small batch: 32 (proven for from-scratch training)
+# - All losses: MLM + MVC + CLS + Proto + CCE + DAB (proven)
+# - More epochs: 150 with cosine LR schedule
+# - Better initialization, stratified batches, early stopping
 # =============================================================================
 
 set -e  # Exit on error
@@ -19,8 +20,6 @@ PROJECT_ROOT="/inspire/cpfs/project/sais-ai-for-science-code/public/mession/runn
 
 cd "${PROJECT_ROOT}"
 
-export PROJECT_ROOT="${PROJECT_ROOT}"
-
 # =============================================================================
 # Use the system conda environment with CUDA PyTorch
 # =============================================================================
@@ -30,7 +29,7 @@ CONDA_PYTHON="/inspire/cpfs/project/sais-ai-for-science-code/public/conda/minico
 # Experiment identification
 # =============================================================================
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-EXPERIMENT_NAME="scGPT_v5_${TIMESTAMP}"
+EXPERIMENT_NAME="scGPT_v4_${TIMESTAMP}"
 LOG_DIR="${PROJECT_ROOT}/run_log"
 mkdir -p "${LOG_DIR}"
 
@@ -39,7 +38,7 @@ STDOUT_LOG="${LOG_DIR}/run_${TIMESTAMP}.log"
 STDERR_LOG="${LOG_DIR}/run_${TIMESTAMP}_err.log"
 
 echo "============================================" | tee -a "${STDOUT_LOG}"
-echo "scGPT v5 Fine-tuning (from-scratch optimized)" | tee -a "${STDOUT_LOG}"
+echo "scGPT v4 Fine-tuning (from-scratch optimized)" | tee -a "${STDOUT_LOG}"
 echo "Experiment: ${EXPERIMENT_NAME}" | tee -a "${STDOUT_LOG}"
 echo "Timestamp: $(date)" | tee -a "${STDOUT_LOG}"
 echo "============================================" | tee -a "${STDOUT_LOG}"
@@ -100,26 +99,15 @@ else
 fi
 
 # =============================================================================
-# Step 4: Verify Python syntax
+# Step 4: Run v4 fine-tuning
 # =============================================================================
-echo "[Step 4] Verifying Python syntax..." | tee -a "${STDOUT_LOG}"
-${CONDA_PYTHON} -c "
-import py_compile
-py_compile.compile('${PROJECT_ROOT}/examples/finetune_integration.py', doraise=True)
-print('Syntax OK!')
-" 2>&1 | tee -a "${STDOUT_LOG}"
-
-# =============================================================================
-# Step 5: Run v5 fine-tuning
-# =============================================================================
-echo "[Step 5] Starting v5 fine-tuning..." | tee -a "${STDOUT_LOG}"
+echo "[Step 4] Starting v4 fine-tuning..." | tee -a "${STDOUT_LOG}"
 
 cd "${PROJECT_ROOT}/examples"
 
-# Run the finetune_integration.py v5
+# Run the finetune_integration.py v4
 CUDA_VISIBLE_DEVICES=0 \
 WANDB_MODE=disabled \
-PROJECT_ROOT="${PROJECT_ROOT}" \
 ${CONDA_PYTHON} -u "${PROJECT_ROOT}/examples/finetune_integration.py" \
     2>&1 | tee -a "${STDOUT_LOG}"
 
@@ -127,9 +115,9 @@ TRAINING_EXIT_CODE=${PIPESTATUS[0]}
 echo "Training finished with exit code ${TRAINING_EXIT_CODE}" | tee -a "${STDOUT_LOG}"
 
 # =============================================================================
-# Step 6: Verify evaluation results
+# Step 5: Verify evaluation results
 # =============================================================================
-echo "[Step 6] Checking evaluation results..." | tee -a "${STDOUT_LOG}"
+echo "[Step 5] Checking evaluation results..." | tee -a "${STDOUT_LOG}"
 
 # Find the latest save directory
 LATEST_SAVE_DIR=$(ls -td "${PROJECT_ROOT}/examples/save/dev_PBMC_10K-"* 2>/dev/null | head -1)

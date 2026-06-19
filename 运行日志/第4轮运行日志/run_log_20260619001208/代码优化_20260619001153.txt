@@ -1,0 +1,21 @@
+I'll start by understanding the project structure, existing code, and the feedback from previous tests. Let me explore systematically.
+
+Now let me read the key source files - the training script, model, and loss functionNow let me look at the recent save directories and scib metrics to understand the latest resultsExcellent! I can see that the Jun18-23-27 run actually achieved ARI=0.801 and avg_bio=0.783. Now let me understand the full picture and implement improvements. Let me look at the `eval_scib_metrics` function and the trainer:
+
+Now I have a complete understanding. Let me implement the improvements:
+
+Based on my analysis:
+1. The v4 code already has the right architecture but needs optimization
+2. The H20 has 96GB - we can use much larger batch sizes
+3. We need better prototype contrastive head, larger capacity, and better training dynamics
+
+Let me implement the changes:
+
+**Step 1: Improve PrototypeContrastiveHead in model.py**
+
+Now let me improve the main training script with better architecture and training dynamics:
+
+Now I'll make the comprehensive edits to `finetune_integration.py`. Let me first replace the docstring and hyperparameters:
+
+Now let me update the model initialization and evaluation functionsNow let me update the model training section to handle `loss_ecs` which is referenced but ECS is disabled:
+

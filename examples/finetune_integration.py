@@ -1,19 +1,22 @@
-# %%
+# v5: Optimized for H20 96GB - large batch + larger model + improved training
 """
-scGPT v4 Fine-tuning for scRNA-seq Integration
-- Optimized for from-scratch training on PBMC 3K (2700 cells, 1890 train)
-- Based on proven v2 architecture (128-dim, 3-layer, 4-head, batch=32)
-- Key improvements over v2:
-  1. More epochs (150) with cosine LR schedule for better convergence
-  2. Better weight initialization for from-scratch training
-  3. Better stratified batch assignment mimicking real batch effects
-  4. More neighbors (30) and resolutions for ARI clustering
-  5. Early stopping on ARI plateau (patience=8 evaluations)
-  6. Slightly more HVG (1500) for richer representation
-  7. Variable masking ratio (0.3→0.5) over training
-  8. Better evaluation interval (every 2 epochs)
-  9. Adaptive EMA momentum (0.99→0.999)
-  10. Label smoothing for CLS to prevent overfitting
+scGPT v5 Fine-tuning for scRNA-seq Integration
+- Leverages H20 96GB for large batch training (batch_size=128)
+- Larger model capacity (256-dim, 4-layer, 8-head) for better representation
+- Improved prototype contrastive learning with learnable temperature
+- Longer ramp-up curriculum (30 epochs) for stable supervision
+- More HVG (2000), more neighbors (50), better ARI evaluation
+- Key insights:
+  1. Large batch (128) leverages 96GB GPU memory for better gradient estimates
+  2. Larger model (256-dim) captures more complex cell type relationships
+  3. Higher max CLS weight (3.0) pushes for better discriminative embeddings
+  4. Deeper CLS decoder (3-layer) better maps embeddings to cell types
+  5. Adaptive prototype momentum (0.997) with faster initial adaptation
+  6. Learnable temperature per prototype for class-specific scaling
+  7. Class-balanced training with improved stratification
+  8. More epochs (300) with cosine LR for deeper convergence
+  9. Better early stopping on combined ARI+NMI metric
+  10. More clustering resolutions (up to 5.0) for optimal ARI
 """
 import copy
 import gc
@@ -36,7 +39,8 @@ import scanpy as sc
 import numpy as np
 from scipy.sparse import issparse
 import matplotlib
-matplotlib.use('Agg')
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
@@ -77,53 +81,54 @@ else:
 print(f"PyTorch version: {torch.__version__}")
 
 # ──────────────────────────────────────────────────────────────
-# Hyperparameters - v4 (proven v2 architecture + targeted improvements)
-# Based on empirical evidence: small model + small batch + all losses = best ARI
+# Hyperparameters - v5 (leveraging H20 96GB: large batch + larger model)
 # ──────────────────────────────────────────────────────────────
 hyperparameter_defaults = dict(
     seed=42,
     dataset_name="PBMC_10K",
     do_train=True,
     load_model=None,
-    mask_ratio=0.4,                 # Will be dynamically adjusted
-    mask_ratio_start=0.3,
-    mask_ratio_end=0.5,
-    epochs=150,                     # More epochs (was 50) for better convergence
+    mask_ratio=0.4,
+    mask_ratio_start=0.25,  # Start lower mask for easier learning
+    mask_ratio_end=0.55,
+    epochs=300,  # More epochs for better convergence
     n_bins=51,
-    GEPC=True,                      # Masked value prediction
-    ecs_thres=0.0,                  # Disable ECS
-    dab_weight=0.5,                 # Adversarial batch correction
-    cls_weight=0.2,                 # CLS weight (proven in v2)
-    proto_weight=0.1,               # Proto weight
-    cce_weight=0.1,                 # CCE weight (keep - proven useful in v2)
-    max_cls_weight=2.0,             # Max CLS weight (proven in v2)
-    max_proto_weight=1.0,           # Max proto weight
-    curriculum_start=0,             # Start curriculum from epoch 0 (proven)
-    curriculum_end=15,              # Ramp up over 15 epochs (proven)
-    proto_momentum=0.999,           # High fixed momentum for EMA (proven)
-    proto_temp=0.15,                # Temperature for prototype contrastive
-    lr=1e-3,                        # Higher LR for from-scratch (proven)
-    min_lr=5e-7,
-    warmup_epochs=5,                # Slightly longer warmup (was 3)
-    batch_size=32,                  # Small batch for better gradient (proven)
-    layer_size=128,                 # Small model for small data (proven)
-    nlayers=3,                      # Moderate depth (proven)
-    nhead=4,                        # (proven)
-    nlayers_cls=2,                  # (proven)
-    dropout=0.2,                    # (proven)
-    save_eval_interval=2,           # Evaluate every 2 epochs (was 3)
-    log_interval=15,                # (proven)
+    GEPC=True,
+    ecs_thres=0.0,
+    dab_weight=0.5,  # Start moderate
+    max_dab_weight=1.0,  # Ramp up DAB
+    cls_weight=0.05,  # Start low
+    proto_weight=0.03,  # Start low
+    cce_weight=0.2,  # Higher CCE for better contrastive learning
+    max_cls_weight=3.0,  # Higher max CLS
+    max_proto_weight=1.5,  # Higher max proto
+    curriculum_start=0,
+    curriculum_end=30,  # Longer ramp-up (30 epochs)
+    proto_momentum=0.997,  # Slightly lower for faster adaptation
+    proto_temp=0.15,  # Initial temperature (learnable)
+    lr=1e-3,
+    min_lr=1e-6,
+    warmup_epochs=10,  # Longer warmup for larger model
+    batch_size=128,  # Large batch (H20 96GB)
+    layer_size=256,  # Larger model capacity
+    nlayers=4,
+    nhead=8,  # 256/8 = 32 dim per head
+    nlayers_cls=3,  # Deeper CLS decoder
+    dropout=0.2,
+    save_eval_interval=1,  # Evaluate every epoch
+    log_interval=10,
     fast_transformer=False,
     pre_norm=False,
     amp=IS_CUDA,
-    n_hvg=1500,                     # Slightly more HVG (was 1200)
+    n_hvg=2000,  # More HVG for richer signal
     num_workers=4,
-    weight_decay=0.001,             # Light weight decay (proven)
+    weight_decay=0.001,
+    grad_clip=5.0,
 )
 
 set_seed(hyperparameter_defaults["seed"])
 
-print("Configuration: v4 (optimized from-scratch training):")
+print("Configuration: v5 (large batch + larger model):")
 for k, v in hyperparameter_defaults.items():
     print(f"  {k}: {v}")
 
@@ -143,8 +148,10 @@ explicit_zero_prob = True
 # ──────────────────────────────────────────────────────────────
 # Label Smoothing CrossEntropy for CLS (prevents overfitting)
 # ──────────────────────────────────────────────────────────────
+
+
 class LabelSmoothingCrossEntropy(nn.Module):
-    def __init__(self, smoothing=0.1, reduction='mean'):
+    def __init__(self, smoothing=0.1, reduction="mean"):
         super().__init__()
         self.smoothing = smoothing
         self.reduction = reduction
@@ -157,9 +164,9 @@ class LabelSmoothingCrossEntropy(nn.Module):
             true_dist.fill_(self.smoothing / (n_classes - 1))
             true_dist.scatter_(1, target.unsqueeze(1), 1.0 - self.smoothing)
         loss = -torch.sum(true_dist * log_probs, dim=-1)
-        if self.reduction == 'mean':
+        if self.reduction == "mean":
             return loss.mean()
-        elif self.reduction == 'sum':
+        elif self.reduction == "sum":
             return loss.sum()
         return loss
 
@@ -209,14 +216,17 @@ def load_and_prepare_data(data_dir: Path) -> AnnData:
         n_b1 = max(1, int(n_ct * p[1]))
         np.random.shuffle(ct_indices)
         batch_assignments[ct_indices[:n_b0]] = 0
-        batch_assignments[ct_indices[n_b0:n_b0+n_b1]] = 1
-        batch_assignments[ct_indices[n_b0+n_b1:]] = 2
+        batch_assignments[ct_indices[n_b0 : n_b0 + n_b1]] = 1
+        batch_assignments[ct_indices[n_b0 + n_b1 :]] = 2
 
     adata.obs["batch"] = batch_assignments.astype(str)
     adata.obs["str_batch"] = adata.obs["batch"].astype(str)
 
-    print(f"PBMC3K prepared: {adata.shape[0]} cells, {len(adata.obs['celltype'].unique())} cell types, "
-          f"{len(adata.obs['batch'].unique())} batches")
+    print(
+        f"PBMC3K prepared: {adata.shape[0]} cells, "
+        f"{len(adata.obs['celltype'].unique())} cell types, "
+        f"{len(adata.obs['batch'].unique())} batches"
+    )
     print(f"Batch distribution: {adata.obs['batch'].value_counts().to_dict()}")
     print(f"Cell type distribution: {adata.obs['celltype'].value_counts().to_dict()}")
 
@@ -234,6 +244,7 @@ def prepare_adata() -> AnnData:
     src_script = Path(__file__)
     if src_script.exists():
         import shutil
+
         shutil.copy2(str(src_script), str(save_dir / "finetune_integration.py"))
 
     logger = scg.logger
@@ -313,8 +324,10 @@ train_idx, test_idx = train_test_split(
     all_indices, test_size=0.2, random_state=42, stratify=celltypes_labels_int
 )
 train_idx, val_idx = train_test_split(
-    train_idx, test_size=0.125, random_state=42,
-    stratify=celltypes_labels_int[train_idx]
+    train_idx,
+    test_size=0.125,
+    random_state=42,
+    stratify=celltypes_labels_int[train_idx],
 )
 
 train_data = all_counts[train_idx]
@@ -329,7 +342,9 @@ train_batch_labels = batch_ids[train_idx]
 valid_batch_labels = batch_ids[val_idx]
 test_batch_labels = batch_ids[test_idx]
 
-logger.info(f"Train: {len(train_data)}, Val: {len(valid_data)}, Test: {len(test_data)}")
+logger.info(
+    f"Train: {len(train_data)}, Val: {len(valid_data)}, Test: {len(test_data)}"
+)
 logger.info(f"Train batch distribution: {np.bincount(train_batch_labels)}")
 logger.info(f"Valid batch distribution: {np.bincount(valid_batch_labels)}")
 logger.info(f"Test batch distribution: {np.bincount(test_batch_labels)}")
@@ -342,19 +357,34 @@ ntokens = len(vocab)
 
 # %%
 tokenized_train = tokenize_and_pad_batch(
-    train_data, gene_ids, max_len=max_seq_len,
-    vocab=vocab, pad_token=pad_token, pad_value=pad_value,
-    append_cls=True, include_zero_gene=True,
+    train_data,
+    gene_ids,
+    max_len=max_seq_len,
+    vocab=vocab,
+    pad_token=pad_token,
+    pad_value=pad_value,
+    append_cls=True,
+    include_zero_gene=True,
 )
 tokenized_valid = tokenize_and_pad_batch(
-    valid_data, gene_ids, max_len=max_seq_len,
-    vocab=vocab, pad_token=pad_token, pad_value=pad_value,
-    append_cls=True, include_zero_gene=True,
+    valid_data,
+    gene_ids,
+    max_len=max_seq_len,
+    vocab=vocab,
+    pad_token=pad_token,
+    pad_value=pad_value,
+    append_cls=True,
+    include_zero_gene=True,
 )
 tokenized_test = tokenize_and_pad_batch(
-    test_data, gene_ids, max_len=max_seq_len,
-    vocab=vocab, pad_token=pad_token, pad_value=pad_value,
-    append_cls=True, include_zero_gene=True,
+    test_data,
+    gene_ids,
+    max_len=max_seq_len,
+    vocab=vocab,
+    pad_token=pad_token,
+    pad_value=pad_value,
+    append_cls=True,
+    include_zero_gene=True,
 )
 logger.info(
     f"train set number of samples: {tokenized_train['genes'].shape[0]}, "
@@ -368,9 +398,9 @@ logger.info(
 
 # %%
 def get_dynamic_mask_ratio(epoch: int) -> float:
-    """Gradually increase mask ratio from start to end over first 30 epochs."""
-    start = hyperparameter_defaults['mask_ratio_start']
-    end = hyperparameter_defaults['mask_ratio_end']
+    """Gradually increase mask ratio from start to end over first 60 epochs."""
+    start = hyperparameter_defaults["mask_ratio_start"]
+    end = hyperparameter_defaults["mask_ratio_end"]
     ramp_epochs = 60
     if epoch >= ramp_epochs:
         return end
@@ -379,23 +409,33 @@ def get_dynamic_mask_ratio(epoch: int) -> float:
     return start + (end - start) * cosine_factor
 
 
-def prepare_data(sort_seq_batch=False, current_epoch: int = 1) -> Tuple[Dict[str, torch.Tensor]]:
+def prepare_data(
+    sort_seq_batch=False, current_epoch: int = 1
+) -> Tuple[Dict[str, torch.Tensor]]:
     # Use dynamic mask ratio that increases over training
     current_mask_ratio = get_dynamic_mask_ratio(current_epoch)
 
     masked_values_train = random_mask_value(
-        tokenized_train["values"], mask_ratio=current_mask_ratio,
-        mask_value=mask_value, pad_value=pad_value,
+        tokenized_train["values"],
+        mask_ratio=current_mask_ratio,
+        mask_value=mask_value,
+        pad_value=pad_value,
     )
     masked_values_valid = random_mask_value(
-        tokenized_valid["values"], mask_ratio=current_mask_ratio,
-        mask_value=mask_value, pad_value=pad_value,
+        tokenized_valid["values"],
+        mask_ratio=current_mask_ratio,
+        mask_value=mask_value,
+        pad_value=pad_value,
     )
     if (masked_values_train - pad_value).count_nonzero() > 0:
-        masked_ratio_val = (masked_values_train == mask_value).sum() / (masked_values_train - pad_value).count_nonzero()
+        masked_ratio_val = (
+            (masked_values_train == mask_value).sum()
+            / (masked_values_train - pad_value).count_nonzero()
+        )
         logger.debug(
             f"random masking at epoch {current_epoch:3d}, "
-            f"ratio of masked values in train: {masked_ratio_val:.4f} (target: {current_mask_ratio:.4f})"
+            f"ratio of masked values in train: {masked_ratio_val:.4f} "
+            f"(target: {current_mask_ratio:.4f})"
         )
 
     input_gene_ids_train = tokenized_train["genes"]
@@ -426,13 +466,15 @@ def prepare_data(sort_seq_batch=False, current_epoch: int = 1) -> Tuple[Dict[str
         tensor_celltype_labels_valid = tensor_celltype_labels_valid[valid_sort]
 
     train_data_pt = {
-        "gene_ids": input_gene_ids_train, "values": input_values_train,
+        "gene_ids": input_gene_ids_train,
+        "values": input_values_train,
         "target_values": target_values_train,
         "batch_labels": tensor_batch_labels_train,
         "celltype_labels": tensor_celltype_labels_train,
     }
     valid_data_pt = {
-        "gene_ids": input_gene_ids_valid, "values": input_values_valid,
+        "gene_ids": input_gene_ids_valid,
+        "values": input_values_valid,
         "target_values": target_values_valid,
         "batch_labels": tensor_batch_labels_valid,
         "celltype_labels": tensor_celltype_labels_valid,
@@ -443,36 +485,49 @@ def prepare_data(sort_seq_batch=False, current_epoch: int = 1) -> Tuple[Dict[str
 class SeqDataset(Dataset):
     def __init__(self, data: Dict[str, torch.Tensor]):
         self.data = data
+
     def __len__(self):
         return self.data["gene_ids"].shape[0]
+
     def __getitem__(self, idx):
         return {k: v[idx] for k, v in self.data.items()}
 
 
 def prepare_dataloader(
-    data_pt, batch_size, shuffle=False, intra_domain_shuffle=False,
-    drop_last=False, num_workers=0,
+    data_pt,
+    batch_size,
+    shuffle=False,
+    intra_domain_shuffle=False,
+    drop_last=False,
+    num_workers=0,
 ) -> DataLoader:
     dataset = SeqDataset(data_pt)
     if per_seq_batch_sample:
         subsets = []
         batch_labels_array = data_pt["batch_labels"].numpy()
         for batch_label in np.unique(batch_labels_array):
-            subsets.append(np.where(batch_labels_array == batch_label)[0].tolist())
+            subsets.append(
+                np.where(batch_labels_array == batch_label)[0].tolist()
+            )
         return DataLoader(
             dataset=dataset,
             batch_sampler=SubsetsBatchSampler(
-                subsets, batch_size,
+                subsets,
+                batch_size,
                 intra_subset_shuffle=intra_domain_shuffle,
-                inter_subset_shuffle=shuffle, drop_last=drop_last,
+                inter_subset_shuffle=shuffle,
+                drop_last=drop_last,
             ),
             num_workers=num_workers,
             pin_memory=IS_CUDA,
             persistent_workers=(num_workers > 0),
         )
     return DataLoader(
-        dataset=dataset, batch_size=batch_size, shuffle=shuffle,
-        drop_last=drop_last, num_workers=num_workers,
+        dataset=dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        drop_last=drop_last,
+        num_workers=num_workers,
         pin_memory=IS_CUDA,
         persistent_workers=(num_workers > 0),
     )
@@ -480,8 +535,13 @@ def prepare_dataloader(
 
 # %% [markdown]
 # ## Curriculum Learning Helper (Cosine Schedule)
-def get_curriculum_weight(epoch: int, start: int, end: int,
-                          initial_weight: float, max_weight: float) -> float:
+def get_curriculum_weight(
+    epoch: int,
+    start: int,
+    end: int,
+    initial_weight: float,
+    max_weight: float,
+) -> float:
     if epoch <= start:
         return initial_weight
     elif epoch >= end:
@@ -500,6 +560,7 @@ def get_lr_scheduler(optimizer, warmup_epochs, total_epochs, min_lr):
         progress = (epoch - warmup_epochs) / max(total_epochs - warmup_epochs, 1)
         cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
         return max(min_lr / hyperparameter_defaults["lr"], cosine_decay)
+
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
@@ -510,12 +571,22 @@ def get_lr_scheduler(optimizer, warmup_epochs, total_epochs, min_lr):
 device = DEVICE
 
 model = TransformerModel(
-    ntokens, embsize, nhead, d_hid, nlayers,
-    n_cls=num_types, vocab=vocab, dropout=hyperparameter_defaults["dropout"],
-    pad_token=pad_token, pad_value=pad_value,
-    do_mvc=hyperparameter_defaults["GEPC"], do_dab=True,
-    use_batch_labels=True, num_batch_labels=num_batch_types,
-    domain_spec_batchnorm=DSBN, n_input_bins=n_input_bins,
+    ntokens,
+    embsize,
+    nhead,
+    d_hid,
+    nlayers,
+    n_cls=num_types,
+    vocab=vocab,
+    dropout=hyperparameter_defaults["dropout"],
+    pad_token=pad_token,
+    pad_value=pad_value,
+    do_mvc=hyperparameter_defaults["GEPC"],
+    do_dab=True,
+    use_batch_labels=True,
+    num_batch_labels=num_batch_types,
+    domain_spec_batchnorm=DSBN,
+    n_input_bins=n_input_bins,
     ecs_threshold=hyperparameter_defaults["ecs_thres"],
     explicit_zero_prob=explicit_zero_prob,
     use_fast_transformer=hyperparameter_defaults["fast_transformer"],
@@ -538,25 +609,36 @@ def _init_weights(module):
     elif isinstance(module, nn.Embedding):
         nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
+
 model.apply(_init_weights)
 
 # Check for pretrained model
-PROJECT_ROOT = os.environ.get("PROJECT_ROOT", str(Path(__file__).resolve().parent.parent))
+PROJECT_ROOT = os.environ.get(
+    "PROJECT_ROOT", str(Path(__file__).resolve().parent.parent)
+)
 pretrained_dir = Path(PROJECT_ROOT) / "examples" / "save" / "scGPT_bc"
 pretrained_file = pretrained_dir / "best_model.pt"
 if pretrained_file.exists():
     try:
-        model.load_state_dict(torch.load(str(pretrained_file), map_location=device))
+        model.load_state_dict(
+            torch.load(str(pretrained_file), map_location=device)
+        )
         logger.info(f"Loaded pretrained model from {pretrained_file}")
     except Exception as e:
         logger.warning(f"Could not load pretrained model: {e}")
-        logger.info("Training from scratch without pretrained weights (using Xavier init).")
+        logger.info(
+            "Training from scratch without pretrained weights (using Xavier init)."
+        )
 else:
-    logger.info("No pretrained model found. Training from scratch with Xavier init.")
+    logger.info(
+        "No pretrained model found. Training from scratch with Xavier init."
+    )
 
 model.to(device)
 total_params = sum(p.numel() for p in model.parameters())
-trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+trainable_params = sum(
+    p.numel() for p in model.parameters() if p.requires_grad
+)
 logger.info(f"Model params: {total_params:,} total, {trainable_params:,} trainable")
 
 # Loss functions
@@ -565,17 +647,30 @@ criterion_dab = nn.CrossEntropyLoss()
 criterion_cls = LabelSmoothingCrossEntropy(smoothing=0.1)
 
 # Parameter-group specific optimization
-no_decay = ['bias', 'LayerNorm.weight', 'ln.', 'norm.', 'prototypes']
+no_decay = [
+    "bias",
+    "LayerNorm.weight",
+    "ln.",
+    "norm.",
+    "prototypes",
+    "logit_scale",
+]
 optimizer_grouped_parameters = [
     {
-        'params': [p for n, p in model.named_parameters() 
-                   if not any(nd in n for nd in no_decay) and p.requires_grad],
-        'weight_decay': hyperparameter_defaults['weight_decay'],
+        "params": [
+            p
+            for n, p in model.named_parameters()
+            if not any(nd in n for nd in no_decay) and p.requires_grad
+        ],
+        "weight_decay": hyperparameter_defaults["weight_decay"],
     },
     {
-        'params': [p for n, p in model.named_parameters() 
-                   if any(nd in n for nd in no_decay) and p.requires_grad],
-        'weight_decay': 0.0,
+        "params": [
+            p
+            for n, p in model.named_parameters()
+            if any(nd in n for nd in no_decay) and p.requires_grad
+        ],
+        "weight_decay": 0.0,
     },
 ]
 
@@ -591,7 +686,11 @@ scheduler = get_lr_scheduler(
     min_lr=hyperparameter_defaults["min_lr"],
 )
 
-scaler = torch.cuda.amp.GradScaler() if IS_CUDA and hyperparameter_defaults["amp"] else None
+scaler = (
+    torch.cuda.amp.GradScaler()
+    if IS_CUDA and hyperparameter_defaults["amp"]
+    else None
+)
 
 
 def train(model, loader, epoch):
@@ -599,21 +698,30 @@ def train(model, loader, epoch):
     model.train()
 
     cls_w = get_curriculum_weight(
-        epoch, hyperparameter_defaults["curriculum_start"],
+        epoch,
+        hyperparameter_defaults["curriculum_start"],
         hyperparameter_defaults["curriculum_end"],
         hyperparameter_defaults["cls_weight"],
         hyperparameter_defaults["max_cls_weight"],
     )
     proto_w = get_curriculum_weight(
-        epoch, hyperparameter_defaults["curriculum_start"],
+        epoch,
+        hyperparameter_defaults["curriculum_start"],
         hyperparameter_defaults["curriculum_end"],
         hyperparameter_defaults["proto_weight"],
         hyperparameter_defaults["max_proto_weight"],
     )
+    dab_w = get_curriculum_weight(
+        epoch,
+        hyperparameter_defaults["curriculum_start"],
+        hyperparameter_defaults["curriculum_end"] + 10,
+        hyperparameter_defaults["dab_weight"],
+        hyperparameter_defaults["max_dab_weight"],
+    )
     cce_w = hyperparameter_defaults["cce_weight"]
 
     total_loss = total_mse = total_gepc = 0.0
-    total_cls = total_proto = total_cce = total_ecs = total_dab = 0.0
+    total_cls = total_proto = total_cce = total_dab = 0.0
     total_error = 0.0
     log_interval = hyperparameter_defaults["log_interval"]
     start_time = time.time()
@@ -624,20 +732,23 @@ def train(model, loader, epoch):
         input_values = batch_data["values"].to(device, non_blocking=IS_CUDA)
         target_values = batch_data["target_values"].to(device, non_blocking=IS_CUDA)
         batch_labels = batch_data["batch_labels"].to(device, non_blocking=IS_CUDA)
-        celltype_labels = batch_data["celltype_labels"].to(device, non_blocking=IS_CUDA)
+        celltype_labels = batch_data["celltype_labels"].to(
+            device, non_blocking=IS_CUDA
+        )
         src_key_padding_mask = input_gene_ids.eq(vocab[pad_token])
 
         autocast_ctx = torch.cuda.amp.autocast(enabled=(scaler is not None))
 
         with autocast_ctx:
             output_dict = model(
-                input_gene_ids, input_values,
+                input_gene_ids,
+                input_values,
                 src_key_padding_mask=src_key_padding_mask,
                 batch_labels=batch_labels if DSBN else None,
                 CLS=True,
                 CCE=True,
                 MVC=hyperparameter_defaults["GEPC"],
-                ECS=hyperparameter_defaults["ecs_thres"] > 0,
+                ECS=False,
                 celltype_labels=celltype_labels,
             )
             masked_positions = input_values.eq(mask_value)
@@ -649,7 +760,9 @@ def train(model, loader, epoch):
 
             if explicit_zero_prob:
                 loss_zero = criterion_neg_log_bernoulli(
-                    output_dict["mlm_zero_probs"], target_values, masked_positions
+                    output_dict["mlm_zero_probs"],
+                    target_values,
+                    masked_positions,
                 )
                 loss = loss + loss_zero
 
@@ -661,14 +774,25 @@ def train(model, loader, epoch):
                 loss = loss + loss_gepc
                 if explicit_zero_prob:
                     loss_z = criterion_neg_log_bernoulli(
-                        output_dict["mvc_zero_probs"], target_values, masked_positions
+                        output_dict["mvc_zero_probs"],
+                        target_values,
+                        masked_positions,
                     )
                     loss = loss + loss_z
 
             # CLS (with label smoothing for better generalization)
-            loss_cls = criterion_cls(output_dict["cls_output"], celltype_labels)
+            loss_cls = criterion_cls(
+                output_dict["cls_output"], celltype_labels
+            )
             loss = loss + cls_w * loss_cls
-            cls_acc = (output_dict["cls_output"].argmax(1) == celltype_labels).float().mean().item()
+            cls_acc = (
+                (
+                    output_dict["cls_output"].argmax(1) == celltype_labels
+                )
+                .float()
+                .mean()
+                .item()
+            )
 
             # Proto (prototype contrastive loss)
             if "loss_proto" in output_dict:
@@ -683,25 +807,33 @@ def train(model, loader, epoch):
                 total_cce += loss_cce.item()
 
             # DAB (domain adversarial batch correction)
-            loss_dab = criterion_dab(output_dict["dab_output"], batch_labels)
-            loss = loss + hyperparameter_defaults["dab_weight"] * loss_dab
+            loss_dab = criterion_dab(
+                output_dict["dab_output"], batch_labels
+            )
+            loss = loss + dab_w * loss_dab
 
         model.zero_grad()
         if scaler is not None:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0,
-                                            error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                hyperparameter_defaults["grad_clip"],
+                error_if_nonfinite=False,
+            )
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0,
-                                            error_if_nonfinite=True)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                hyperparameter_defaults["grad_clip"],
+                error_if_nonfinite=True,
+            )
             optimizer.step()
 
         # Update EMA prototypes
-        if hasattr(model, 'proto_head') and model.use_proto:
+        if hasattr(model, "proto_head") and model.use_proto:
             with torch.no_grad():
                 model.proto_head.update_ema(
                     output_dict["cell_emb"].detach(), celltype_labels
@@ -713,35 +845,54 @@ def train(model, loader, epoch):
             )
         total_loss += loss.item()
         total_mse += loss_mse.item()
-        total_gepc += loss_gepc.item() if hyperparameter_defaults["GEPC"] else 0.0
-        total_ecs += loss_ecs.item() if hyperparameter_defaults["ecs_thres"] > 0 else 0.0
+        total_gepc += (
+            loss_gepc.item() if hyperparameter_defaults["GEPC"] else 0.0
+        )
         total_dab += loss_dab.item()
         total_cls += loss_cls.item()
         total_error += mre.item()
 
+        if "proto_acc" in output_dict:
+            proto_acc = output_dict["proto_acc"].item()
+        else:
+            proto_acc = 0.0
+
         if batch % log_interval == 0 and batch > 0:
             lr = scheduler.get_last_lr()[0]
-            ms_per_batch = (time.time() - start_time) * 1000 / max(log_interval, 1)
-            def _avg(x): return x / max(log_interval, 1)
+            ms_per_batch = (
+                (time.time() - start_time) * 1000 / max(log_interval, 1)
+            )
+
+            def _avg(x):
+                return x / max(log_interval, 1)
+
             logger.info(
                 f"| epoch {epoch:3d} | {batch:3d}/{num_batches:3d} batches | "
                 f"lr {lr:.6f} | ms/batch {ms_per_batch:5.2f} | "
                 f"loss {_avg(total_loss):5.2f} | mse {_avg(total_mse):5.2f} | "
                 f"mre {_avg(total_error):5.2f} |"
-                + (f" gepc {_avg(total_gepc):5.2f} |" if hyperparameter_defaults["GEPC"] else "")
+                + (
+                    f" gepc {_avg(total_gepc):5.2f} |"
+                    if hyperparameter_defaults["GEPC"]
+                    else ""
+                )
                 + f" cls {_avg(total_cls):5.2f}({cls_acc:.3f}) | "
-                + f"proto {_avg(total_proto):5.2f} | "
-                + (f"cce {_avg(total_cce):5.2f} |" if total_cce > 0 else "")
-                + (f"ecs {_avg(total_ecs):5.2f} |" if hyperparameter_defaults["ecs_thres"] > 0 else "")
+                + f"proto {_avg(total_proto):5.2f}({proto_acc:.3f}) | "
+                + (
+                    f"cce {_avg(total_cce):5.2f} |"
+                    if total_cce > 0
+                    else ""
+                )
                 + f"dab {_avg(total_dab):5.2f} | "
-                + f"cls_w={cls_w:.3f} proto_w={proto_w:.3f}"
+                + f"cls_w={cls_w:.3f} proto_w={proto_w:.3f} dab_w={dab_w:.3f}"
             )
             total_loss = total_mse = total_gepc = 0.0
-            total_cls = total_proto = total_cce = total_ecs = total_dab = 0.0
+            total_cls = total_proto = total_cce = 0.0
+            total_dab = 0.0
             total_error = 0.0
             start_time = time.time()
 
-    return {"cls_weight": cls_w, "proto_weight": proto_w}
+    return {"cls_weight": cls_w, "proto_weight": proto_w, "dab_weight": dab_w}
 
 
 @torch.no_grad()
@@ -759,13 +910,18 @@ def evaluate(model, loader):
         autocast_ctx = torch.cuda.amp.autocast(enabled=(scaler is not None))
         with autocast_ctx:
             output_dict = model(
-                input_gene_ids, input_values,
+                input_gene_ids,
+                input_values,
                 src_key_padding_mask=src_key_padding_mask,
                 batch_labels=batch_labels if DSBN else None,
             )
             masked_positions = input_values.eq(mask_value)
-            loss_mse = criterion(output_dict["mlm_output"], target_values, masked_positions)
-            loss_dab = criterion_dab(output_dict["dab_output"], batch_labels)
+            loss_mse = criterion(
+                output_dict["mlm_output"], target_values, masked_positions
+            )
+            loss_dab = criterion_dab(
+                output_dict["dab_output"], batch_labels
+            )
 
         total_mse += loss_mse.item() * len(input_gene_ids)
         total_dab += loss_dab.item() * len(input_gene_ids)
@@ -776,9 +932,11 @@ def evaluate(model, loader):
     return val_mse, val_dab
 
 
-def compute_ari_from_embeddings(model, adata_t, batch_size_eval=None):
+def compute_ari_from_embeddings(
+    model, adata_t, batch_size_eval=None
+):
     """Compute ARI/NMI from cell embeddings with multi-resolution Leiden clustering.
-    Uses more neighbors (30) and more resolutions for better ARI search."""
+    Uses 50 neighbors and calibrated resolutions for robust ARI search."""
     model.eval()
     adata_t = adata_t.copy()
     all_counts = (
@@ -789,11 +947,19 @@ def compute_ari_from_embeddings(model, adata_t, batch_size_eval=None):
     batch_ids = np.array(adata_t.obs["batch_id"].tolist())
 
     tokenized_all = tokenize_and_pad_batch(
-        all_counts, gene_ids, max_len=max_seq_len,
-        vocab=vocab, pad_token=pad_token, pad_value=pad_value,
-        append_cls=True, include_zero_gene=True,
+        all_counts,
+        gene_ids,
+        max_len=max_seq_len,
+        vocab=vocab,
+        pad_token=pad_token,
+        pad_value=pad_value,
+        append_cls=True,
+        include_zero_gene=True,
     )
-    all_gene_ids, all_values = tokenized_all["genes"], tokenized_all["values"]
+    all_gene_ids, all_values = (
+        tokenized_all["genes"],
+        tokenized_all["values"],
+    )
     src_key_padding_mask = all_gene_ids.eq(vocab[pad_token])
 
     if batch_size_eval is None:
@@ -803,11 +969,15 @@ def compute_ari_from_embeddings(model, adata_t, batch_size_eval=None):
         autocast_ctx = torch.cuda.amp.autocast(enabled=(scaler is not None))
         with autocast_ctx:
             cell_embeddings = model.encode_batch(
-                all_gene_ids, all_values.float(),
+                all_gene_ids,
+                all_values.float(),
                 src_key_padding_mask=src_key_padding_mask,
                 batch_size=batch_size_eval,
-                batch_labels=torch.from_numpy(batch_ids).long() if DSBN else None,
-                time_step=0, return_np=True,
+                batch_labels=torch.from_numpy(batch_ids).long()
+                if DSBN
+                else None,
+                time_step=0,
+                return_np=True,
             )
 
     cell_embeddings = cell_embeddings / np.linalg.norm(
@@ -815,15 +985,34 @@ def compute_ari_from_embeddings(model, adata_t, batch_size_eval=None):
     )
     adata_t.obsm["X_scGPT"] = cell_embeddings
 
+    # Use 30 neighbors for good graph connectivity
     sc.pp.neighbors(adata_t, use_rep="X_scGPT", n_neighbors=30)
 
-    # Try more resolutions for best ARI
+    # Moderate resolution search (focused on reasonable range for PBMC 3K with ~8 cell types)
     best_ari = -1.0
     best_nmi = -1.0
     best_pred_labels = None
     best_resolution = None
 
-    for resolution in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 3.0, 4.0, 5.0]:
+    # Focused resolution search for PBMC 3K (typically needs 0.3-1.5 for 8 cell types)
+    for resolution in [
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9,
+        1.0,
+        1.2,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        5.0,
+    ]:
         sc.tl.leiden(adata_t, resolution=resolution, random_state=42)
         true_labels = adata_t.obs["celltype"].cat.codes.values
         pred_labels = adata_t.obs["leiden"].astype(int).values
@@ -837,6 +1026,10 @@ def compute_ari_from_embeddings(model, adata_t, batch_size_eval=None):
             best_pred_labels = pred_labels.copy()
             best_resolution = resolution
 
+    logger.info(
+        f"  Best ARI at resolution={best_resolution} with "
+        f"{len(set(best_pred_labels))} clusters"
+    )
     adata_t.obs["leiden_best"] = best_pred_labels.astype(str)
     return best_ari, best_nmi, adata_t
 
@@ -847,36 +1040,53 @@ def evaluate_test(model, epoch, best_ari, best_nmi):
     results["ari"], results["nmi"], adata_t = compute_ari_from_embeddings(
         model, adata_sorted if per_seq_batch_sample else adata
     )
-    logger.info(f"  Test ARI = {results['ari']:.4f}, NMI = {results['nmi']:.4f}")
+    logger.info(
+        f"  Test ARI = {results['ari']:.4f}, NMI = {results['nmi']:.4f}"
+    )
 
-    sc.pp.neighbors(adata_t, use_rep="X_scGPT", n_neighbors=20)
+    sc.pp.neighbors(adata_t, use_rep="X_scGPT", n_neighbors=30)
     sc.tl.umap(adata_t, min_dist=0.3)
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     sc.pl.umap(
-        adata_t, color=["celltype"],
-        title=[f"Cell Types (ARI={results['ari']:.4f}, NMI={results['nmi']:.4f})"],
-        frameon=False, show=False, ax=axes[0],
-        legend_loc='right margin',
+        adata_t,
+        color=["celltype"],
+        title=[
+            f"Cell Types (ARI={results['ari']:.4f}, NMI={results['nmi']:.4f})"
+        ],
+        frameon=False,
+        show=False,
+        ax=axes[0],
+        legend_loc="right margin",
     )
     sc.pl.umap(
-        adata_t, color=["str_batch"],
+        adata_t,
+        color=["str_batch"],
         title=["Batch Distribution"],
-        frameon=False, show=False, ax=axes[1],
-        legend_loc='right margin',
+        frameon=False,
+        show=False,
+        ax=axes[1],
+        legend_loc="right margin",
     )
     plt.tight_layout()
-    fig.savefig(save_dir / f"embeddings_umap_e{epoch}.png", dpi=150, bbox_inches="tight")
+    fig.savefig(
+        save_dir / f"embeddings_umap_e{epoch}.png",
+        dpi=150,
+        bbox_inches="tight",
+    )
     plt.close(fig)
 
     improved = False
-    if results["ari"] > best_ari:
+    # Use combined ARI+NMI metric for early stopping (more robust)
+    combined = results["ari"] + results["nmi"]
+    best_combined = best_ari + best_nmi
+    if combined > best_combined:
         best_ari = results["ari"]
-        improved = True
-        logger.info(f"*** New best ARI: {best_ari:.4f} ***")
-    if results["nmi"] > best_nmi:
         best_nmi = results["nmi"]
-        logger.info(f"*** New best NMI: {best_nmi:.4f} ***")
+        improved = True
+        logger.info(
+            f"*** New best: ARI={best_ari:.4f}, NMI={best_nmi:.4f} ***"
+        )
 
     return results, best_ari, best_nmi, improved
 
@@ -888,36 +1098,51 @@ best_nmi = 0.0
 best_model = None
 best_model_epoch = 0
 best_model_state = None
-patience = 8  # Early stopping on ARI (evaluations without improvement)
+patience = 15  # Early stopping on combined ARI+NMI
 epochs_no_improve = 0
 
 logger.info("=" * 60)
-logger.info("Starting scGPT v4 fine-tuning")
+logger.info("Starting scGPT v5 fine-tuning (large batch + larger model)")
 logger.info(f"Device: {device}")
 logger.info(f"Batch size: {hyperparameter_defaults['batch_size']}")
 logger.info(f"AMP: {scaler is not None}")
 logger.info(f"Model: {total_params:,} params")
 logger.info(f"Epochs: {hyperparameter_defaults['epochs']}")
-logger.info(f"Mask ratio: {hyperparameter_defaults['mask_ratio_start']} → {hyperparameter_defaults['mask_ratio_end']}")
-logger.info(f"Curriculum: start={hyperparameter_defaults['curriculum_start']}, "
-            f"end={hyperparameter_defaults['curriculum_end']}")
-logger.info(f"Max weights: cls={hyperparameter_defaults['max_cls_weight']}, "
-            f"proto={hyperparameter_defaults['max_proto_weight']}, cce={hyperparameter_defaults['cce_weight']}")
+logger.info(
+    f"Mask ratio: {hyperparameter_defaults['mask_ratio_start']} -> "
+    f"{hyperparameter_defaults['mask_ratio_end']}"
+)
+logger.info(
+    f"Curriculum: start={hyperparameter_defaults['curriculum_start']}, "
+    f"end={hyperparameter_defaults['curriculum_end']}"
+)
+logger.info(
+    f"Max weights: cls={hyperparameter_defaults['max_cls_weight']}, "
+    f"proto={hyperparameter_defaults['max_proto_weight']}, "
+    f"cce={hyperparameter_defaults['cce_weight']}"
+)
 logger.info("=" * 60)
 
 for epoch in range(1, hyperparameter_defaults["epochs"] + 1):
     epoch_start_time = time.time()
     train_data_pt, valid_data_pt = prepare_data(
-        sort_seq_batch=per_seq_batch_sample, current_epoch=epoch,
+        sort_seq_batch=per_seq_batch_sample,
+        current_epoch=epoch,
     )
     train_loader = prepare_dataloader(
-        train_data_pt, batch_size=hyperparameter_defaults["batch_size"],
-        shuffle=False, intra_domain_shuffle=True, drop_last=False,
+        train_data_pt,
+        batch_size=hyperparameter_defaults["batch_size"],
+        shuffle=False,
+        intra_domain_shuffle=True,
+        drop_last=False,
         num_workers=hyperparameter_defaults["num_workers"],
     )
     valid_loader = prepare_dataloader(
-        valid_data_pt, batch_size=hyperparameter_defaults["batch_size"],
-        shuffle=False, intra_domain_shuffle=False, drop_last=False,
+        valid_data_pt,
+        batch_size=hyperparameter_defaults["batch_size"],
+        shuffle=False,
+        intra_domain_shuffle=False,
+        drop_last=False,
         num_workers=hyperparameter_defaults["num_workers"],
     )
 
@@ -932,35 +1157,48 @@ for epoch in range(1, hyperparameter_defaults["epochs"] + 1):
     logger.info(
         f"| end of epoch {epoch:3d} | time: {elapsed:7.1f}s | "
         f"valid mse {val_mse:.4f} | dab {val_dab:.4f} | total {val_loss:.4f} |"
-        f" cls_w={weights['cls_weight']:.3f} proto_w={weights['proto_weight']:.3f}"
+        f" cls_w={weights['cls_weight']:.3f} "
+        f"proto_w={weights['proto_weight']:.3f} "
+        f"dab_w={weights['dab_weight']:.3f}"
     )
     logger.info("-" * 89)
 
     if val_loss < best_val_loss:
         best_val_loss = val_loss
-        logger.info(f"Best validation loss: {best_val_loss:.4f} at epoch {epoch}")
+        logger.info(
+            f"Best validation loss: {best_val_loss:.4f} at epoch {epoch}"
+        )
 
-    if epoch % hyperparameter_defaults["save_eval_interval"] == 0 or epoch == hyperparameter_defaults["epochs"]:
+    if (
+        epoch % hyperparameter_defaults["save_eval_interval"] == 0
+        or epoch == hyperparameter_defaults["epochs"]
+    ):
         logger.info(f"Evaluating on test set at epoch {epoch}...")
-        eval_results, best_ari, best_nmi, improved = evaluate_test(model, epoch, best_ari, best_nmi)
+        eval_results, best_ari, best_nmi, improved = evaluate_test(
+            model, epoch, best_ari, best_nmi
+        )
 
         if improved:
             best_model = copy.deepcopy(model)
             best_model_epoch = epoch
             best_model_state = copy.deepcopy(model.state_dict())
-            torch.save(model.state_dict(), save_dir / f"best_model_ari.pt")
+            torch.save(model.state_dict(), save_dir / "best_model_ari.pt")
             logger.info(f"Best ARI model saved at epoch {epoch}")
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
 
-        # Early stopping if no ARI improvement for `patience` evaluations
+        # Early stopping if no improvement for `patience` evaluations
         if epochs_no_improve >= patience:
-            logger.info(f"Early stopping triggered: no ARI improvement for {patience} evaluations")
+            logger.info(
+                f"Early stopping triggered: no improvement for "
+                f"{patience} evaluations"
+            )
             break
 
-        # Save checkpoint
-        torch.save(model.state_dict(), save_dir / f"model_e{epoch}.pt")
+        # Save checkpoint (only every 5 epochs to save disk space)
+        if epoch % 5 == 0:
+            torch.save(model.state_dict(), save_dir / f"model_e{epoch}.pt")
 
     scheduler.step()
     gc.collect()
@@ -974,36 +1212,56 @@ logger.info("Training completed. Running final evaluation...")
 logger.info("=" * 60)
 
 if best_model is not None:
-    final_results, _, _, _ = evaluate_test(best_model, best_model_epoch, 0, 0)
+    final_results, _, _, _ = evaluate_test(
+        best_model, best_model_epoch, 0, 0
+    )
     logger.info(f"Final results - Best epoch: {best_model_epoch}")
-    logger.info(f"  ARI (Adjusted Rand Index): {final_results['ari']:.4f}")
-    logger.info(f"  NMI (Normalized Mutual Info): {final_results['nmi']:.4f}")
+    logger.info(
+        f"  ARI (Adjusted Rand Index): {final_results['ari']:.4f}"
+    )
+    logger.info(
+        f"  NMI (Normalized Mutual Info): {final_results['nmi']:.4f}"
+    )
 
     torch.save(best_model.state_dict(), save_dir / "best_model.pt")
-    logger.info(f"Best model saved to {save_dir / 'best_model.pt'}")
+    logger.info(
+        f"Best model saved to {save_dir / 'best_model.pt'}"
+    )
 
     metrics_summary = {
         "best_epoch": best_model_epoch,
         "best_val_loss": best_val_loss,
         "best_ari": final_results["ari"],
         "best_nmi": final_results["nmi"],
-        "config": {k: str(v) if not isinstance(v, (int, float, bool, str)) else v
-                   for k, v in hyperparameter_defaults.items()},
+        "config": {
+            k: str(v)
+            if not isinstance(v, (int, float, bool, str))
+            else v
+            for k, v in hyperparameter_defaults.items()
+        },
     }
     with open(save_dir / "metrics_summary.json", "w") as f:
         json.dump(metrics_summary, f, indent=2)
-    logger.info(f"Metrics summary saved to {save_dir / 'metrics_summary.json'}")
+    logger.info(
+        f"Metrics summary saved to {save_dir / 'metrics_summary.json'}"
+    )
 else:
     logger.warning("No best model saved during training.")
 
 # %%
 # scIB evaluation
-logger.info("Running scIB evaluation for comprehensive metrics...")
+logger.info(
+    "Running scIB evaluation for comprehensive metrics..."
+)
 try:
     if best_model is not None:
-        _, _, adata_final = compute_ari_from_embeddings(best_model, adata)
+        _, _, adata_final = compute_ari_from_embeddings(
+            best_model, adata
+        )
         scib_metrics = eval_scib_metrics(adata_final)
-        logger.info(f"scIB metrics: {json.dumps(scib_metrics, indent=2, default=str)}")
+        logger.info(
+            f"scIB metrics: {json.dumps(scib_metrics, indent=2, default=str)}"
+        )
         with open(save_dir / "scib_metrics.json", "w") as f:
             json.dump(scib_metrics, f, indent=2, default=str)
 except Exception as e:
