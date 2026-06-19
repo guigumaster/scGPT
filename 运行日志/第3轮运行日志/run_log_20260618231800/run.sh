@@ -1,14 +1,18 @@
 #!/bin/bash
 # =============================================================================
-# scGPT v4 Fine-tuning for scRNA-seq Integration
-# Optimized for from-scratch training on PBMC 3K with NVIDIA H20 (96GB)
+# scGPT v3 Fine-tuning with Prototype-based Contrastive Learning
+# Cell Type-Aware Fine-tuning - Optimized for NVIDIA H20 (96GB)
 #
-# Based on proven v2 architecture (ARI=0.5999) with targeted improvements:
-# - Small model: 128-dim, 3-layer, 4-head (proven for small data)
-# - Small batch: 32 (proven for from-scratch training)
-# - All losses: MLM + MVC + CLS + Proto + CCE + DAB (proven)
-# - More epochs: 150 with cosine LR schedule
-# - Better initialization, stratified batches, early stopping
+# Key improvements in v3 (based on failure analysis of v2):
+# - Larger model: 256-dim, 6-layer, 8-head (was 128/3/4)
+# - Large batch size: 256 (was 32) - leveraging 96GB HBM3
+# - Focal Loss for CLS to handle class imbalance
+# - CCE removed (redundant with prototype contrastive)
+# - Delayed curriculum start: epoch 5 (was 0)
+# - Longer curriculum ramp: 5→40 (was 0→15)
+# - More epochs: 80 with early stopping (was 50)
+# - HVG: 2000 genes (was 1200)
+# - Adaptive EMA momentum: 0.85→0.999
 # =============================================================================
 
 set -e  # Exit on error
@@ -29,7 +33,7 @@ CONDA_PYTHON="/inspire/cpfs/project/sais-ai-for-science-code/public/conda/minico
 # Experiment identification
 # =============================================================================
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-EXPERIMENT_NAME="scGPT_v4_${TIMESTAMP}"
+EXPERIMENT_NAME="scGPT_v3_proto_${TIMESTAMP}"
 LOG_DIR="${PROJECT_ROOT}/run_log"
 mkdir -p "${LOG_DIR}"
 
@@ -38,7 +42,7 @@ STDOUT_LOG="${LOG_DIR}/run_${TIMESTAMP}.log"
 STDERR_LOG="${LOG_DIR}/run_${TIMESTAMP}_err.log"
 
 echo "============================================" | tee -a "${STDOUT_LOG}"
-echo "scGPT v4 Fine-tuning (from-scratch optimized)" | tee -a "${STDOUT_LOG}"
+echo "scGPT v3 Prototype-based Contrastive Learning" | tee -a "${STDOUT_LOG}"
 echo "Experiment: ${EXPERIMENT_NAME}" | tee -a "${STDOUT_LOG}"
 echo "Timestamp: $(date)" | tee -a "${STDOUT_LOG}"
 echo "============================================" | tee -a "${STDOUT_LOG}"
@@ -84,7 +88,7 @@ else
 fi
 
 # =============================================================================
-# Step 3: Prepare pretrained model checkpoint (optional)
+# Step 3: Prepare pretrained model checkpoint
 # =============================================================================
 echo "[Step 3] Checking pretrained model..." | tee -a "${STDOUT_LOG}"
 
@@ -95,17 +99,31 @@ if [ -f "${PRETRAINED_DIR}/best_model.pt" ]; then
     echo "Pretrained model found at ${PRETRAINED_DIR}" | tee -a "${STDOUT_LOG}"
     ls -la "${PRETRAINED_DIR}/" | tee -a "${STDOUT_LOG}"
 else
-    echo "No pretrained model found. Training from scratch with Xavier init." | tee -a "${STDOUT_LOG}"
+    echo "No pretrained model found. Training from scratch." | tee -a "${STDOUT_LOG}"
+    echo "For better results, download a pretrained checkpoint to:" | tee -a "${STDOUT_LOG}"
+    echo "  ${PRETRAINED_DIR}/" | tee -a "${STDOUT_LOG}"
 fi
 
 # =============================================================================
-# Step 4: Run v4 fine-tuning
+# Step 4: Run v3 prototype-based contrastive learning fine-tuning
 # =============================================================================
-echo "[Step 4] Starting v4 fine-tuning..." | tee -a "${STDOUT_LOG}"
+echo "[Step 4] Starting v3 prototype-based contrastive learning fine-tuning..." | tee -a "${STDOUT_LOG}"
 
 cd "${PROJECT_ROOT}/examples"
 
-# Run the finetune_integration.py v4
+# Run the finetune_integration.py v3 with GPU-optimized configuration
+#
+# Key improvements in v3 over v2:
+# - Larger model (256-dim, 6 layers, 8 heads) for better representation
+# - Batch size 256 (was 32) leveraging 96GB H20
+# - CCE loss removed (was conflicting with prototype contrastive)
+# - Focal Loss for CLS handles class imbalance
+# - Delayed curriculum: start at epoch 5 (was day 0)
+# - Longer ramp: 5→40 (was 0→15)
+# - Adaptive EMA momentum: 0.85→0.999
+# - HVG: 2000 (was 1200)
+# - Early stopping for ARI plateau
+#
 CUDA_VISIBLE_DEVICES=0 \
 WANDB_MODE=disabled \
 ${CONDA_PYTHON} -u "${PROJECT_ROOT}/examples/finetune_integration.py" \
@@ -158,10 +176,16 @@ print(json.dumps(data, indent=2))
 " 2>&1 | tee -a "${STDOUT_LOG}"
     fi
     
+    # Check for evaluation UMAPs
+    if ls "${LATEST_SAVE_DIR}"/embeddings_*.png 1>/dev/null 2>&1; then
+        echo "Evaluation figures:" | tee -a "${STDOUT_LOG}"
+        ls -la "${LATEST_SAVE_DIR}"/embeddings_*.png | tee -a "${STDOUT_LOG}"
+    fi
+    
     # Check run log
     if [ -f "${LATEST_SAVE_DIR}/run.log" ]; then
-        echo "Last 30 lines of training log:" | tee -a "${STDOUT_LOG}"
-        tail -30 "${LATEST_SAVE_DIR}/run.log" | tee -a "${STDOUT_LOG}"
+        echo "Last 50 lines of training log:" | tee -a "${STDOUT_LOG}"
+        tail -50 "${LATEST_SAVE_DIR}/run.log" | tee -a "${STDOUT_LOG}"
     fi
 else
     echo "No save directory found. Checking error log..." | tee -a "${STDOUT_LOG}"

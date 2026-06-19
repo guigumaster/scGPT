@@ -1,0 +1,60 @@
+Let me start by understanding the project structure and reading the key files.
+
+Let me read the key files nowLet me read additional files to understand the full implementationNow I have a thorough understanding of the code. Let me analyze the failed run and devise the optimizations.
+
+Now I have a thorough understanding of all the issues. Let me now implement the optimized versionNow let me update the run.sh to use the optimized configuration:
+
+Now let me verify the modified file is correct:
+
+Let me verify the model creation and training loop sectionsLet me also check if there's another run.sh that needs updating:
+
+现在让我提供一个完整的变更摘要：
+
+## 变更摘要
+
+### 分析的问题（v2 失败原因）
+
+从日志分析看出，v2 的最佳 ARI 为 **0.5563**（scIB 测试为 0.6040），未能达到基线 0.7100。根本原因：
+
+1. **模型太小**：128维 × 3层 × 4头，仅 705K 参数，不足以学习良好的细胞类型表征
+2. **批次大小太小**：batch_size=32 导致对比学习梯度噪声大，CCE 损失效果差
+3. **CCE 与 Proto 冲突**：两个对比学习目标（CCE + Prototype）存在梯度冲突
+4. **课程学习过于激进**：从第0轮开始就注入监督信号，破坏了基因表达重建
+5. **CLS权重与重建损失不平衡**：CLS损失(0.2-2.0)远小于MLM+MVC(110+)，监督信号被淹没
+
+### 已修改的文件
+
+**1. `examples/finetune_integration.py`** - 完整重写为 v3 版本，包含12项关键优化：
+
+| 优化项 | v2（旧） | v3（新） |
+|--------|---------|---------|
+| 模型维度 | 128 | **256** |
+| Transformer层数 | 3 | **6** |
+| 注意力头数 | 4 | **8** |
+| CLS分类器层数 | 2 | **3** |
+| 批次大小 | 32 | **256**（利用96GB H20） |
+| CCE对比损失 | ✅ 启用（与Proto冲突） | **❌ 移除** |
+| CLS损失函数 | CrossEntropy | **Focal Loss (gamma=2.0)** |
+| 课程学习起止 | epoch 0→15 | **epoch 5→40** |
+| 最大CLS权重 | 2.0 | **1.5** |
+| 最大Proto权重 | 1.0 | **0.8** |
+| EMA动量 | 0.999（固定） | **0.85→0.999（自适应）** |
+| HVG基因数 | 1200 | **2000** |
+| 训练轮数 | 50 | **80 + 早停** |
+| 优化器 | 统一weight_decay | **参数分组优化** |
+| 伪批次分配 | 随机 | **按细胞类型分层** |
+
+**2. `run_log/run.sh`** - 更新为 v3 实验配置
+
+### 运行方式
+
+```bash
+bash /inspire/.../scGPT/run_log/run.sh
+```
+
+该脚本会：
+1. 检查 GPU（NVIDIA H20, 96GB）
+2. 验证 CUDA PyTorch 环境
+3. 安装 scGPT（如果需要）
+4. 运行 v3 微调训练（80轮 + ARI早停）
+5. 自动评估最佳模型并输出 scIB 综合指标
