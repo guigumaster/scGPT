@@ -1,0 +1,78 @@
+Let me start by reading the core files of the project to understand the codebaseNow I have a thorough understanding of the codebase. Let me implement the **CCE + AdaDAR** fusion strategy across all the relevant files.
+
+Now I'll implement all the changes. Let me start with the core modifications:
+
+### Step 1: Modify `scgpt/model/model.py` — Add CCE weight, AdaDAR adaptive lambda support, and improved ECSNow update the `AdversarialDiscriminator` to support adaptive lambda:
+
+Now update the CCE loss to be weighted properly in the model's forward output:
+
+### Step 2: Modify `scgpt/trainer.py` — Add CCE and AdaDAR supportNow let me update the `train` function in `trainer.py` to add CCE and AdaDAR:
+
+Let me apply the remaining edits in trainer.py one by one:
+
+I see there's a reference to `total_loss_extra` which doesn't exist. Let me fix the logging:
+
+Now let me add the AdaDAR scheduler class to `trainer.py`:
+
+
+
+### Step 3: Modify `examples/finetune_integration.py` — Major CCE+AdaDAR improvements
+
+Now update the model creation to pass CCE and AdaDAR parametersNow update the train function in finetune_integration.py to use CCE, AdaDAR, and dynamic ECS:
+
+Now let me do the major rewrite of the train function in `finetune_integration.py`:
+
+Now update the main training loop to create and pass the AdaDAR scheduler:
+
+Now update the main training loop to create AdaDAR scheduler and use CCENow I need to update `prepare_data` to accept a `mask_ratio` parameter instead of using the global oneNow pass `current_mask_ratio` to `prepare_data` in the training loop
+
+Let me verify the key files look correct:
+
+All code changes are consistent. Now let me create the `run.sh` scriptLet me verify the `epoch` variable usage in `prepare_data`:
+
+I notice the `ecs_current` is computed but not actually used to update the model's ECS threshold. Let me fix this:
+
+All files compile successfully. Let me provide a comprehensive summary of the changes made:
+
+---
+
+## 总结：融合对比学习细胞嵌入与自适应 DAR 调节的联合优化策略（CCE + AdaDAR）
+
+### 修改的文件列表
+
+#### 1. `scgpt/model/model.py`（核心模型架构）
+- **新增参数**: `cce_weight`, `cce_temp`, `ada_dar_initial_lambda` — 支持 CCE 权重配置、对比学习温度参数和 AdaDAR 初始 lambda 值
+- **CCE 损失加权**: 将 `loss_cce` 乘以 `cce_weight` 实现可控对比学习强度
+- **AdaDAR 支持**: `AdversarialDiscriminator` 新增 `use_adaptive_lambda` 和 `set_lambda()` 方法，支持动态梯度反转强度
+- **判别器精度追踪**: 在训练时自动计算 `dab_accuracy` 用于 AdaDAR 调度
+- **可配置温度**: `Similarity(temp=cce_temp)` 使用可配置的温度参数
+
+#### 2. `scgpt/trainer.py`（训练器）
+- **新增 `AdaDARScheduler` 类**: 基于判别器精度的自适应 DAR 调度器，通过滑动平均平滑精度值，自动调整梯度反转 lambda
+- **CCE 集成**: 在 `train()` 函数中添加 `CCE=True` 传递，`loss_cce` 的计算和日志记录
+- **AdaDAR 调度钩子**: 从 `output_dict` 中读取 `dab_accuracy` 并调用调度器更新模型 lambda
+- **日志增强**: 显示 `cce` 和 `ada_dar_lambda` 等训练指标
+
+#### 3. `examples/finetune_integration.py`（主要微调入口）
+- **超参数扩展**: 新增 `CCE`, `cce_weight`, `cce_temp`, `ecs_dynamic`, `ada_dar`, `ada_dar_target_acc`, `ada_dar_min_lambda`, `ada_dar_max_lambda`, `ada_dar_step` 等参数
+- **增强学习率**: 从 `1e-4` 提升至 `2e-4` 加速收敛
+- **CCE 前向传递**: 在 `model()` 调用中添加 `CCE=config.CCE` 启用对比学习
+- **AdaDAR 初始化**: 在训练开始前初始化 AdaDAR 调度器，配置目标精度和 lambda 范围
+- **动态 ECS**: ECS 阈值从高到低退火（`ecs_thres * (1 - 0.5 * epoch / config.epochs)`），早期促进判别性，后期保留多样性
+- **增强数据增强**: 掩码率随训练进程从 0.4 逐渐增加到 0.6
+
+#### 4. `scgpt/__init__.py`（模块导出）
+- 导出 `AdaDARScheduler` 供外部使用
+
+### 五个策略步骤
+
+| 步骤 | 策略 | 实现位置 |
+|------|------|----------|
+| 1 | **启用并改造 CCE**: 对比学习细胞嵌入，增强细胞类型判别性 | `model.py` forward + `finetune_integration.py` train |
+| 2 | **实现 AdaDAR 调度器**: 根据判别器精度自动调节批次效应去除强度 | `trainer.py` `AdaDARScheduler` 类 |
+| 3 | **开启弹性细胞相似性(ECS)**: 动态阈值退火，平衡细胞相似性约束 | `finetune_integration.py` train 循环 |
+| 4 | **优化超参数**: 调整学习率、CCE 权重、温度等 | `finetune_integration.py` config |
+| 5 | **改进数据增强**: 掩码率渐进式增加 | `finetune_integration.py` epoch 循环 |
+
+### 运行脚本 (`run_log/run.sh`)
+包含完整的环境检查、依赖安装、训练启动、评估和日志记录流程，已声明的项目根目录为绝对路径。
