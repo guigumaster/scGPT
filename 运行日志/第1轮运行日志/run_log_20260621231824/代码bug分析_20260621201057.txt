@@ -1,0 +1,25 @@
+## 分析结果
+
+根据日志文件的内容，上一轮运行存在明显的**执行异常**。
+
+### 关键证据
+
+日志在训练开始时正常执行了初始化、数据加载、预处理和模型初始化等步骤，但在第一个 epoch（epoch 1）的训练过程中出现了**Traceback（回溯错误）**：
+
+```
+Traceback (most recent call last):
+  File ".../train_cmca.py", line 420, in <module>
+    out = _forward_model(model, ig, iv, src_mask, bl, mt, config, vocab)
+          ^^^^^^^^^^^^^^
+NameError: name '_forward_model' is not defined
+```
+
+**错误原因**：在 `train_cmca.py` 第 420 行调用了 `_forward_model` 函数，但该函数**未在脚本中定义**，导致 `NameError`，程序直接崩溃退出，未能完成训练。
+
+日志末尾没有出现正常的完成信息（如 "Pipeline finished" 或 "Training completed"），说明运行被异常中断。
+
+### 结论
+
+**结论：存在异常**
+
+**原因**：`train_cmca.py` 第 420 行调用未定义的函数 `_forward_model`，导致 `NameError`，程序在第 1 个 epoch 训练期间崩溃退出，未能完整执行完毕。

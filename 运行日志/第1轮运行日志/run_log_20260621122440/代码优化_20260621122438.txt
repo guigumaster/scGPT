@@ -1,0 +1,74 @@
+Let me start by exploring the project structure and reading the necessary files.
+
+Let me now read the core files:
+
+Let me now read the example fine-tuning file and the data collator to understand how the data is prepared:
+
+Now let me read the tokenizer to understand how `mod_types` is structuredNow I have a thorough understanding of the codebase. Let me implement the CMCA-Loss improvement. I'll modify three files:
+
+1. **`scgpt/model/multiomic_model.py`** - Add CMCA loss computation in `MultiOmicTransformerModel`
+2. **`scgpt/trainer.py`** - Integrate CMCA loss in training loop
+3. Create **`run.sh`** with training/validation commands
+
+Let me start:
+
+Let me redo the edits properly, without overlapping changesNow let me apply all edits correctly - all against the original file, no overlapping:
+
+Now let me add the `CMCA` parameter to the forward method signature:
+
+Now let me modify `trainer.py` to integrate CMCA loss in the training loopNow let me update the evaluate function in trainer.py to also pass the CMCA flag:
+
+Now let me create the run.sh script with a complete pipeline:
+
+Let me verify the modifications are correct by reading the key partsLet me fix the run.sh to avoid bash variable expansion issues with Python f-strings:
+
+Let me verify the final state of all modified files:
+
+Let me do a quick syntax check on the modified filesAll files pass syntax validation. Here's a summary of the changes I made:
+
+---
+
+## Summary of Changes
+
+### 1. `scgpt/model/multiomic_model.py` — CMCA-Loss in MultiOmicTransformerModel
+
+**`__init__`** — Added 3 new parameters:
+- `do_cmca: bool = False` — toggle for CMCA loss
+- `cmca_weight: float = 0.1` — loss weight
+- `cmca_temp: float = 0.5` — temperature for InfoNCE cosine similarity
+
+These are stored as `self.do_cmca`, `self.cmca_weight`, `self.cmca_temp`.
+
+**`forward()`** — Added `CMCA: bool = False` parameter. When `CMCA=True` and `self.do_cmca=True` and `mod_types` is provided, calls `_compute_cmca_loss()` and stores `output["loss_cmca"]`.
+
+**`_compute_cmca_loss()`** (new method) — Implements the cross-modal contrastive alignment:
+1. Identifies two distinct modality types from `mod_types`
+2. Creates modality-specific masks (`mask_a` for RNA, `mask_b` for Protein), keeping the CLS token at position 0
+3. Runs `_encode()` separately for each modality with the other modality's tokens masked in `src_key_padding_mask`
+4. Extracts cell embeddings via `_get_cell_emb_from_layer()`
+5. Normalizes and computes cosine similarity matrix (batch × batch)
+6. Applies InfoNCE loss (cross-entropy on cosine similarity with diagonal labels)
+7. Returns the loss scalar
+
+### 2. `scgpt/trainer.py` — CMCA Loss Integration in Training Loop
+
+**`train()` function:**
+- Added `total_cmca` accumulator
+- Passes `CMCA=config.CMCA` in the model forward call
+- If `config.CMCA` and `output_dict` contains `"loss_cmca"`, adds `config.cmca_weight * loss_cmca` to total loss
+- Logs `"train/cmca"` metric to wandb
+- Displays CMCA loss value in progress logging
+
+**`evaluate()` function:**
+- Added `CMCA=False` (explicitly disabled during validation since CMCA is only for training alignment)
+
+### 3. `run_log/run.sh` — Complete Training Pipeline
+
+A self-contained bash script that:
+- Sets the project root as an absolute path
+- Writes a Python training script to a temp file (avoids bash variable expansion issues)
+- Launches single-GPU or distributed (torchrun) training
+- Uses `MultiOmicTransformerModel` with `do_cmca=True, cmca_weight=0.1, cmca_temp=0.5`
+- Configures all objectives: GEP (MLM), GEPC (MVC), ECS (elastic similarity), DAB (domain adversarial), and **CMCA** (cross-modal contrastive alignment)
+- Saves best model and evaluates cell embeddings with `eval_scib_metrics()`
+- Logs everything to `run_log/` directory

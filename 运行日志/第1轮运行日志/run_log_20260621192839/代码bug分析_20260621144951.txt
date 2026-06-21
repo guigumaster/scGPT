@@ -1,0 +1,28 @@
+## 分析结果
+
+根据日志文件分析，上一轮运行**存在异常**。
+
+### 关键证据
+
+日志中明确记录了一个 `ImportError` 错误，程序在执行 `GeneVocab` 初始化时崩溃：
+
+```
+Traceback (most recent call last):
+  File ".../train_cmca.py", line 145, in <module>
+    vocab = GeneVocab(...)
+  File ".../scgpt/tokenizer/gene_tokenizer.py", line 104, in _init_from_tokens
+    from torchtext.vocab import vocab as build_tt_vocab
+ImportError: cannot import name 'vocab' from 'torchtext.vocab'
+```
+
+### 具体说明
+- **错误类型**: `ImportError` — 无法从 `torchtext.vocab` 导入 `vocab` 名称
+- **根本原因**: 当前环境下的 `torchtext` 版本中，`torchtext.vocab` 模块不再包含 `vocab` 这一导出项（API 变更/版本不兼容）
+- **影响范围**: 训练脚本在构建基因词典（`GeneVocab`）时直接崩溃，未进入任何实际训练循环
+- **日志末尾**: 日志在 `Traceback` 处截断，没有出现 `"Pipeline finished"` 等正常结束标记
+
+这意味着上一轮运行**未能完整执行完毕**，在启动阶段即因环境依赖问题失败。
+
+---
+
+**结论: 存在异常**
