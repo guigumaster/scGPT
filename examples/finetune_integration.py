@@ -1,7 +1,18 @@
 # %%
+"""
+scGPT Integration Fine-tuning with Adaptive Curriculum Learning Framework
+
+This script implements the 5-point improvement framework:
+1. Cosine annealing curriculum for DAR adversarial weight and gradient reversal coefficient
+2. Elastic Cell Similarity (ECS) regularization with adaptive threshold
+3. Transformer encoder extended from 4 to 8 layers with pre-norm
+4. Dynamic mask ratio curriculum (0.25 -> 0.55)
+5. Warmup cosine learning rate schedule
+"""
 import copy
 import gc
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -41,6 +52,12 @@ from scgpt.loss import (
 from scgpt.preprocess import Preprocessor
 from scgpt import SubsetsBatchSampler
 from scgpt.utils import set_seed, category_str2int, eval_scib_metrics
+from scgpt.trainer import (
+    get_curriculum_mask_ratio,
+    get_cosine_dab_weight,
+    get_cosine_grad_reverse_lambda,
+    get_warmup_cosine_lr_scheduler,
+)
 
 sc.set_figure_params(figsize=(4, 4))
 os.environ["KMP_WARNINGS"] = "off"
@@ -55,26 +72,15 @@ hyperparameter_defaults = dict(
     epochs=30,
     n_bins=51,
     GEPC=True,  # Masked value prediction for cell embedding
+    # [Improvement 2] Elastic Cell Similarity (ECS) regularization
     ecs_thres=0.8,  # Elastic cell similarity objective, 0.0 to 1.0, 0.0 to disable
+    # [Improvement 1] DAR adversarial weight
     dab_weight=1.0,
     lr=1e-4,
-    batch_size=64,
-    layer_size=128,
-    nlayers=8,  # [Improvement 3] Extended from 4 to 8 layers for enhanced representation
-    nhead=4,
-    # if load model, batch_size, layer_size, nlayers, nhead will be ignored
-    dropout=0.2,
-    schedule_ratio=0.9,  # ratio of epochs for learning rate schedule
-    save_eval_interval=5,
-    log_interval=100,
-    fast_transformer=True,
-    pre_norm=True,  # [Improvement 3] Use pre-norm for better stability with 8 layers
-    amp=True,  # Automatic Mixed Precision
-    # [Improvement 1] Curriculum learning for DAR adversarial weight
+    # [Improvement 1 & 3] DAR curriculum and 8-layer encoder
     dab_weight_curriculum=True,
     dab_weight_min=0.1,
     dab_weight_max=1.0,
-    # [Improvement 1] Curriculum learning for gradient reversal coefficient
     grad_reverse_curriculum=True,
     grad_reverse_lambda_min=0.1,
     grad_reverse_lambda_max=1.0,
@@ -87,6 +93,18 @@ hyperparameter_defaults = dict(
     lr_warmup_epochs=3,
     use_warmup_cosine_lr=True,
     min_lr_ratio=0.05,
+    batch_size=64,
+    layer_size=128,
+    nlayers=8,  # [Improvement 3] Extended from 4 to 8 layers
+    nhead=4,
+    # if load model, batch_size, layer_size, nlayers, nhead will be ignored
+    dropout=0.2,
+    schedule_ratio=0.9,  # ratio of epochs for learning rate schedule (only for StepLR)
+    save_eval_interval=5,
+    log_interval=100,
+    fast_transformer=True,
+    pre_norm=True,  # [Improvement 3] Pre-norm for stability with 8 layers
+    amp=True,  # Automatic Mixed Precision
 )
 run = wandb.init(
     config=hyperparameter_defaults,
@@ -277,21 +295,25 @@ logger.info(
 
 
 # %%
-def prepare_data(sort_seq_batch=False) -> Tuple[Dict[str, torch.Tensor]]:
+# [Improvement 4] Curriculum-enhanced prepare_data with dynamic mask ratio
+def prepare_data(sort_seq_batch=False, current_epoch=1, total_epochs=30) -> Tuple[Dict[str, torch.Tensor]]:
+    # Compute curriculum-based mask ratio
+    effective_mask_ratio = get_curriculum_mask_ratio(config, current_epoch, total_epochs)
+
     masked_values_train = random_mask_value(
         tokenized_train["values"],
-        mask_ratio=mask_ratio,
+        mask_ratio=effective_mask_ratio,
         mask_value=mask_value,
         pad_value=pad_value,
     )
     masked_values_valid = random_mask_value(
         tokenized_valid["values"],
-        mask_ratio=mask_ratio,
+        mask_ratio=effective_mask_ratio,
         mask_value=mask_value,
         pad_value=pad_value,
     )
     print(
-        f"random masking at epoch {epoch:3d}, ratio of masked values in train: ",
+        f"random masking at epoch {current_epoch:3d}, ratio of masked values in train: ",
         f"{(masked_values_train == mask_value).sum() / (masked_values_train - pad_value).count_nonzero():.4f}",
     )
 
@@ -447,17 +469,53 @@ criterion_dab = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(
     model.parameters(), lr=config.lr, eps=1e-4 if config.amp else 1e-8
 )
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1, gamma=config.schedule_ratio)
+
+# [Improvement 5] Use warmup cosine LR scheduler instead of StepLR
+if config.use_warmup_cosine_lr:
+    # Create a dummy DataLoader to estimate batches per epoch
+    dummy_loader = prepare_dataloader(
+        {"gene_ids": torch.zeros(1, 1, dtype=torch.long),
+         "values": torch.zeros(1, 1),
+         "target_values": torch.zeros(1, 1),
+         "batch_labels": torch.zeros(1, dtype=torch.long)},
+        batch_size=config.batch_size,
+    )
+    # Approximate batches per epoch based on training data size
+    num_batches_per_epoch = max(1, len(tokenized_train['genes']) // config.batch_size)
+    scheduler = get_warmup_cosine_lr_scheduler(
+        optimizer,
+        num_warmup_epochs=config.lr_warmup_epochs,
+        num_training_epochs=config.epochs,
+        num_batches_per_epoch=num_batches_per_epoch,
+    )
+    logger.info(f"Using warmup cosine LR scheduler, warmup={config.lr_warmup_epochs} epochs")
+else:
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1, gamma=config.schedule_ratio)
+    logger.info("Using StepLR scheduler")
 
 scaler = torch.cuda.amp.GradScaler(enabled=config.amp)
 
 
-def train(model: nn.Module, loader: DataLoader) -> None:
+# [Improvement 1 & 2] Updated train function with curriculum learning
+def train(model: nn.Module, loader: DataLoader, epoch: int, total_epochs: int) -> None:
     """
-    Train the model for one epoch.
+    Train the model for one epoch with curriculum learning.
+    
+    Args:
+        epoch: current epoch (1-indexed)
+        total_epochs: total number of epochs
     """
     model.train()
-    total_loss, total_mse, total_gepc = 0.0, 0.0, 0.0
+    
+    # [Improvement 1] Compute curriculum-based DAB weight and gradient reversal lambda
+    current_dab_weight = get_cosine_dab_weight(config, epoch, total_epochs)
+    current_grad_lambda = get_cosine_grad_reverse_lambda(config, epoch, total_epochs)
+    
+    # Apply gradient reversal lambda to discriminator
+    if model.do_dab:
+        model.grad_reverse_discriminator.set_lambda(current_grad_lambda)
+    
+    total_loss, total_mse, total_gepc, total_ecs, total_dab = 0.0, 0.0, 0.0, 0.0, 0.0
     total_error = 0.0
     log_interval = config.log_interval
     start_time = time.time()
@@ -480,7 +538,7 @@ def train(model: nn.Module, loader: DataLoader) -> None:
                 ECS=config.ecs_thres > 0,
             )
 
-            masked_positions = input_values.eq(mask_value)  # the postions to predict
+            masked_positions = input_values.eq(mask_value)  # the positions to predict
             loss = loss_mse = criterion(
                 output_dict["mlm_output"], target_values, masked_positions
             )
@@ -505,12 +563,14 @@ def train(model: nn.Module, loader: DataLoader) -> None:
                 metrics_to_log.update(
                     {"train/mvc_nzlp": loss_gepc_zero_log_prob.item()}
                 )
+            # [Improvement 2] ECS regularization
             if config.ecs_thres > 0:
                 loss_ecs = 10 * output_dict["loss_ecs"]
                 loss = loss + loss_ecs
                 metrics_to_log.update({"train/ecs": loss_ecs.item()})
+            # [Improvement 1] DAR with curriculum weight
             loss_dab = criterion_dab(output_dict["dab_output"], batch_labels)
-            loss = loss + config.dab_weight * loss_dab
+            loss = loss + current_dab_weight * loss_dab
             metrics_to_log.update({"train/dab": loss_dab.item()})
 
         model.zero_grad()
@@ -532,6 +592,9 @@ def train(model: nn.Module, loader: DataLoader) -> None:
         scaler.step(optimizer)
         scaler.update()
 
+        # Log curriculum parameters
+        metrics_to_log["train/dab_weight"] = current_dab_weight
+        metrics_to_log["train/grad_lambda"] = current_grad_lambda
         wandb.log(metrics_to_log)
 
         with torch.no_grad():
@@ -542,6 +605,8 @@ def train(model: nn.Module, loader: DataLoader) -> None:
         total_loss += loss.item()
         total_mse += loss_mse.item()
         total_gepc += loss_gepc.item() if config.GEPC else 0.0
+        total_ecs += loss_ecs.item() if config.ecs_thres > 0 else 0.0
+        total_dab += loss_dab.item() if model.do_dab else 0.0
         total_error += mre.item()
         if batch % log_interval == 0 and batch > 0:
             lr = scheduler.get_last_lr()[0]
@@ -549,17 +614,22 @@ def train(model: nn.Module, loader: DataLoader) -> None:
             cur_loss = total_loss / log_interval
             cur_mse = total_mse / log_interval
             cur_gepc = total_gepc / log_interval if config.GEPC else 0.0
+            cur_ecs = total_ecs / log_interval if config.ecs_thres > 0 else 0.0
+            cur_dab = total_dab / log_interval if model.do_dab else 0.0
             cur_error = total_error / log_interval
-            # ppl = math.exp(cur_loss)
             logger.info(
                 f"| epoch {epoch:3d} | {batch:3d}/{num_batches:3d} batches | "
                 f"lr {lr:05.4f} | ms/batch {ms_per_batch:5.2f} | "
                 f"loss {cur_loss:5.2f} | mse {cur_mse:5.2f} | mre {cur_error:5.2f} |"
                 + (f"gepc {cur_gepc:5.2f} |" if config.GEPC else "")
+                + (f"ecs {cur_ecs:5.2f} |" if config.ecs_thres > 0 else "")
+                + (f"dab {cur_dab:5.2f}(w={current_dab_weight:.3f},gr={current_grad_lambda:.3f}) |")
             )
             total_loss = 0
             total_mse = 0
             total_gepc = 0
+            total_ecs = 0
+            total_dab = 0
             total_error = 0
             start_time = time.time()
 
@@ -572,7 +642,7 @@ def define_wandb_metrcis():
     wandb.define_metric("test/avg_bio", summary="max")
 
 
-def evaluate(model: nn.Module, loader: DataLoader) -> float:
+def evaluate(model: nn.Module, loader: DataLoader) -> Tuple[float, float]:
     """
     Evaluate the model on the evaluation data.
     """
@@ -609,18 +679,21 @@ def evaluate(model: nn.Module, loader: DataLoader) -> float:
             total_dab += loss_dab.item() * len(input_gene_ids)
             total_num += len(input_gene_ids)
 
+    avg_loss = total_loss / total_num
+    avg_error = total_error / total_num
+    avg_dab = total_dab / total_num
+
     wandb.log(
         {
-            "valid/mse": total_loss / total_num,
-            "valid/mre": total_error / total_num,
-            "valid/dab": total_dab / total_num,
-            "valid/sum_mse_dab": (total_loss + config.dab_weight * total_dab)
-            / total_num,
+            "valid/mse": avg_loss,
+            "valid/mre": avg_error,
+            "valid/dab": avg_dab,
+            "valid/sum_mse_dab": (avg_loss + config.dab_weight * avg_dab),
             "epoch": epoch,
         },
     )
 
-    return total_loss / total_num, total_error / total_num
+    return avg_loss, avg_error
 
 
 def eval_testdata(
@@ -724,7 +797,12 @@ define_wandb_metrcis()
 
 for epoch in range(1, config.epochs + 1):
     epoch_start_time = time.time()
-    train_data_pt, valid_data_pt = prepare_data(sort_seq_batch=per_seq_batch_sample)
+    # [Improvement 4] Pass current epoch for curriculum mask ratio
+    train_data_pt, valid_data_pt = prepare_data(
+        sort_seq_batch=per_seq_batch_sample,
+        current_epoch=epoch,
+        total_epochs=config.epochs,
+    )
     train_loader = prepare_dataloader(
         train_data_pt,
         batch_size=config.batch_size,
@@ -741,9 +819,12 @@ for epoch in range(1, config.epochs + 1):
     )
 
     if config.do_train:
+        # [Improvement 1, 2] Curriculum-aware training
         train(
             model,
             loader=train_loader,
+            epoch=epoch,
+            total_epochs=config.epochs,
         )
     val_loss, val_mre = evaluate(
         model,
@@ -794,6 +875,7 @@ for epoch in range(1, config.epochs + 1):
         wandb.log(metrics_to_log)
         wandb.log({"avg_bio": results.get("avg_bio", 0.0)})
 
+    # [Improvement 5] Step scheduler (works for both warmup-cosine and StepLR)
     scheduler.step()
 
 

@@ -34,16 +34,31 @@ except (ImportError, OSError) as exc:
 
 
 def _probe_torchtext_vocab_subclassable() -> bool:
-    """Return True when torchtext Vocab can be used as a Python base class."""
+    """Return True when torchtext Vocab can be used as a Python base class
+    AND the deprecated ``vocab()`` factory function is available.
+
+    torchtext >=0.14 (including 0.6.0 shipped alongside PyTorch 2.x)
+    removed the ``vocab`` function that ``_init_from_tokens`` depends on
+    when using the torchtext backend path.  If the factory is missing we
+    fall back to ``BuiltinVocab`` to keep the whole pipeline working.
+    """
     if not torchtext_import_succeeded or _torchtext_vocab_cls is None:
         return False
     try:
         class _TorchtextVocabSubclassProbe(_torchtext_vocab_cls):
             pass
-
-        return True
     except TypeError:
         return False
+
+    # Additionally check that the ``vocab`` factory function exists;
+    # ``gene_tokenizer._init_from_tokens`` uses this import unconditionally
+    # in the torchtext-subclassable path.
+    try:
+        from torchtext.vocab import vocab  # noqa: F401
+    except ImportError:
+        return False
+
+    return True
 
 
 torchtext_vocab_is_subclassable = _probe_torchtext_vocab_subclassable()
@@ -61,9 +76,9 @@ def get_vocab_info() -> str:
         )
     if torchtext_import_succeeded:
         return (
-            "torchtext detected but not subclassable (likely torchtext >=0.14 "
-            "C++ Vocab); using built-in pure-Python Vocab as GeneVocab base "
-            "class."
+            "torchtext detected but the deprecated ``vocab()`` factory function "
+            "is not available (torchtext >=0.6.0); using built-in pure-Python "
+            "Vocab as GeneVocab base class."
         )
     if torchtext_import_error is not None:
         return (

@@ -1,0 +1,19 @@
+## 分析结果
+
+经过分析上一轮执行日志 `/inspire/.../scGPT/run_log/execute_log.log`，结论如下：
+
+**存在异常**
+
+### 异常详情
+
+在 **Step 3 - Training Pipeline** 阶段，程序在执行时抛出 `ImportError` 并崩溃退出（exit code: 1）：
+
+```
+File "/inspire/.../scgpt/tokenizer/gene_tokenizer.py", line 104, in _init_from_tokens
+    from torchtext.vocab import vocab as build_tt_vocab
+ImportError: cannot import name 'vocab' from 'torchtext.vocab'
+```
+
+**问题原因**：当前环境中安装的 `torchtext` 版本（路径：`.../python3.14/site-packages/torchtext/vocab.py`）不再导出 `vocab` 函数，而 `gene_tokenizer.py` 中仍使用旧版导入方式 `from torchtext.vocab import vocab`，导致导入失败。
+
+**影响**：训练流程未能正常启动，`results_summary.json` 也未被生成，整个流水线未完整执行结束。

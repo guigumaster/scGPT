@@ -1,0 +1,21 @@
+## 日志分析结论
+
+**存在异常**
+
+### 异常原因分析
+
+在日志中，训练管线（Step 3）出现了以下关键错误信息：
+
+```
+run.sh: line 124: 767328 Killed                  ${PYTHON_CMD} "${TRAIN_SCRIPT}" ...
+Training exit code: 137
+```
+
+**进程被杀死（exit code 137）**，这通常是由于 **OOM（Out of Memory，内存不足）** 导致操作系统发送 SIGKILL 信号强制终止进程。
+
+具体表现为：
+1. 训练在 **epoch 1** 刚开始时就已被杀死，未能完成任何完整 epoch
+2. 最终 Summary 阶段显示 `Results file not found`（结果文件不存在），说明训练未能正常完成并保存结果
+3. 日志中也有提示：`CUDA is not available`，即当前环境无 GPU，仅使用 CPU 运行，但数据量较大（27658 个细胞，1200 个 HVG），导致 CPU 内存被耗尽
+
+因此，上一轮运行 **未完整执行完毕**，存在执行异常。

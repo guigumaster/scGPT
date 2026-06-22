@@ -55,6 +55,7 @@ class MultiOmicTransformerModel(nn.Module):
         self.d_model = d_model
         self.do_dab = do_dab
         self.ecs_threshold = ecs_threshold
+        self.ecs_threshold_adaptive = ecs_threshold
         self.use_batch_labels = use_batch_labels
         self.domain_spec_batchnorm = domain_spec_batchnorm
         self.input_emb_style = input_emb_style
@@ -155,6 +156,7 @@ class MultiOmicTransformerModel(nn.Module):
                 d_model,
                 n_cls=num_batch_labels,
                 reverse_grad=True,
+                dynamic_lambda=True,
             )
 
         self.sim = Similarity(temp=0.5)  # TODO: auto set temp
@@ -469,7 +471,7 @@ class MultiOmicTransformerModel(nn.Module):
             # only optimize positive similarities
             cos_sim = F.relu(cos_sim)
 
-            output["loss_ecs"] = torch.mean(1 - (cos_sim - self.ecs_threshold) ** 2)
+            output["loss_ecs"] = torch.mean(1 - (cos_sim - self.ecs_threshold_adaptive) ** 2)
 
         if self.do_dab:
             output["dab_output"] = self.grad_reverse_discriminator(cell_emb)
@@ -1062,6 +1064,7 @@ class AdversarialDiscriminator(nn.Module):
         nlayers: int = 3,
         activation: callable = nn.LeakyReLU,
         reverse_grad: bool = False,
+        dynamic_lambda: bool = False,
     ):
         super().__init__()
         # module list
@@ -1072,6 +1075,12 @@ class AdversarialDiscriminator(nn.Module):
             self._decoder.append(nn.LayerNorm(d_model))
         self.out_layer = nn.Linear(d_model, n_cls)
         self.reverse_grad = reverse_grad
+        self.dynamic_lambda = dynamic_lambda
+        self._current_lambd = 1.0
+
+    def set_lambda(self, lambd: float) -> None:
+        """Set the gradient reversal coefficient dynamically."""
+        self._current_lambd = lambd
 
     def forward(self, x: Tensor) -> Tensor:
         """
@@ -1079,7 +1088,7 @@ class AdversarialDiscriminator(nn.Module):
             x: Tensor, shape [batch_size, embsize]
         """
         if self.reverse_grad:
-            x = grad_reverse(x, lambd=1.0)
+            x = grad_reverse(x, lambd=self._current_lambd)
         for layer in self._decoder:
             x = layer(x)
         return self.out_layer(x)
