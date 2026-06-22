@@ -1,0 +1,18 @@
+Let me also check the tokenizer for the `random_mask_value` function:
+
+Now I have a thorough understanding of the codebase. Let me implement the three components of the improvement strategy:
+
+1. **ANOVA F-statistics for gene cell-type specificity scoring**
+2. **Adaptive masking based on gene distinguishability scores**
+3. **Supervised Contrastive (SupCon) loss with curriculum learning**
+
+Let me start implementing.
+
+**Step 1: Add SupCon loss and F-statistics computation to `scgpt/loss.py`**
+
+Now let me update the `scgpt/__init__.py` to export the loss functions properly**Step 2: Add adaptive masking function to `scgpt/tokenizer/gene_tokenizer.py`**Step 3: Modify `tutorials/Tutorial_Integration.py`** - This is the core integration code. I'll make several targeted edits.
+
+First, update imports:
+
+Now add the new hyperparameters for SupCon and adaptive maskingNow I need to modify the `prepare_data` function to support adaptive masking. Let me read the current version:
+
