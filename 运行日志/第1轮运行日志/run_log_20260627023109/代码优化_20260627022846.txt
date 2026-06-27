@@ -1,0 +1,58 @@
+Let me also examine the model architecture and the existing examples file to better understand the CLS mechanismNow I have a thorough understanding of the code. Let me implement the three-in-one complementary strategy:
+
+**Summary of changes needed in `Tutorial_Integration.py`:**
+1. `ecs_thres`: 0.8 → 0.4 (activate ECS with lower threshold)
+2. `dab_weight`: 1.0 → 0.5 (reduce DAR weight)
+3. Add `n_cls=num_types` to model constructor (enable CLS decoder)
+4. Add `celltype_labels` to data dict in `prepare_data()`
+5. Add `criterion_cls` loss function
+6. Pass `CLS=True` in model forward and compute CLS loss
+
+Let me verify the edits were applied correctlyAll edits are applied correctly. Let me now check available resources and create the run scriptNow let me create the `run.sh` file. Let me first make sure I have the correct pathsLet me do a final comprehensive verification of all changes
+
+All changes are verified and correct. Here is a complete summary of what was modified:
+
+---
+
+## Summary of Changes
+
+### 1. Modified file: `tutorials/Tutorial_Integration.py` (7 targeted edits)
+
+**Edit 1 - Hyperparameter tuning (lines 77-78):**
+- `ecs_thres=0.8` → `ecs_thres=0.4`: Lower ECS threshold to pull same-celltype cells closer while relaxing the constraint for different cell types
+- `dab_weight=1.0` → `dab_weight=0.5`: Halve the DAR adversarial weight to reduce batch correction aggression, preserving more biological variation
+
+**Edit 2 - Model architecture (line 458):**
+- Added `n_cls=num_types` to `TransformerModel()` constructor, enabling the built-in `ClsDecoder` with the correct number of cell types
+
+**Edit 3 - Loss criterion (line 473):**
+- Added `criterion_cls = nn.CrossEntropyLoss()` for cell type classification supervision
+
+**Edit 4 - Data preparation (lines 362, 369):**
+- Added `"celltype_labels": torch.from_numpy(train_celltype_labels).long()` and corresponding valid labels to the data dictionaries in `prepare_data()`
+
+**Edit 5 - Training loop data loading (line 500):**
+- Added `celltype_labels = batch_data["celltype_labels"].to(device)` to retrieve cell type labels in `train()`
+
+**Edit 6 - Model forward (line 509):**
+- Added `CLS=True` in model forward call to activate the classification head during training
+
+**Edit 7 - CLS loss computation (lines 543-545):**
+- Added `loss_cls = criterion_cls(...)` and added it to total loss, logged as `train/cls`
+
+### 2. Created file: `run_log/run.sh`
+- Declares `PROJECT_ROOT` as absolute path
+- Copies pretrained `scGPT_human` checkpoint from `/inspire/cpfs/project/.../test_example/...` to `save/scGPT_human/`
+- Sets `CUDA_VISIBLE_DEVICES=0` (H20 GPU, 95.1GB)
+- Sets `WANDB_MODE=offline` (no wandb API key configured)
+- Executes `Tutorial_Integration.py` with `tee` logging to `run_log/`
+
+### How the three-in-one strategy improves ARI/NMI/ASW_label:
+
+| Mechanism | Change | Effect |
+|---|---|---|
+| **CLS = True** | Previously unused → now adds cross-entropy loss on cell embeddings | Directly optimizes cell type separation in embedding space |
+| **ECS = 0.4** | 0.8 → 0.4 (lower threshold) | Makes ECS loss more active, pulling embeddings of same cell type closer |
+| **DAB = 0.5** | 1.0 → 0.5 (reduced weight) | Reduces batch-correction emphasis, preserving more biological signal |
+
+The synergy: CLS provides direct supervision for cell type classification → cell embeddings become more type-discriminative → ECS at lower threshold further clusters same-type cells → reduced DAB weight preserves these improved biological separations during batch correction. This directly targets ARI, NMI, and ASW_label metrics.

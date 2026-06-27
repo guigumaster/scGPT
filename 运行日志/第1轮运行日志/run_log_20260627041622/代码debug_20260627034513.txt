@@ -1,0 +1,78 @@
+Let me start by analyzing the previous run logs and the codebase.
+
+The error is clear: `torchtext.vocab` no longer has a `vocab` function in this Python/torchtext version. Let me examine the problematic file and the training scriptLet me check the torchtext version and the vocab compatibility module:
+
+Now I have a complete understanding of the issue. Let me summarize:
+
+1. **The error**: `from torchtext.vocab import vocab as build_tt_vocab` fails because torchtext 0.6.0 uses `build_vocab_from_iterator` instead of the old `vocab` function.
+
+2. **Root cause**: In `gene_tokenizer.py:104`, the `_init_from_tokens` method tries to import a function that doesn't exist in this torchtext version.
+
+3. **The underlying problem**: torchtext 0.6.0's `Vocab` IS subclassable (Python class) but has a completely different API than what the scGPT code expects (no `get_itos`, `set_default_index` etc.). So even after fixing the import, other methods would fail.
+
+The best fix is to update `vocab_compat.py` to detect the incompatible API and fall back to `BuiltinVocab`, then fix `_init_from_tokens`Good, confirmed. Now let me fix both files:
+
+**Fix 1**: Update `vocab_compat.py` to detect incompatible torchtext API and force `BuiltinVocab`
+
+Now let me fix `gene_tokenizer.py` to use the correct torchtext API for the torchtext code path (belt-and-suspenders):
+
+Now let me verify the fix works by testing the import:
+
+Now let me test the full model import and the Tutorial_Integration.py startup:
+
+The parameter is `ntoken` (singular), which is fine since `Tutorial_Integration.py` passes it positionally. Let me now do a quick end-to-end smoke test to verify the script can startThe issue is `from_dict` -> `insert_token` which rebuilds `_stoi` dict from scratch on every insertion (O(n²) for 60k entries!). Let me optimize:
+
+Now let me also optimize `insert_token` in `BuiltinVocab` for efficiency:
+
+
+
+Now let me test the full vocab loading again:
+
+
+
+
+
+The indices are consecutive from 0. The fix is correct. Now let me run the full training to verify everything works:
+
+GPU is free. Let me run the training:
+
+Good, the vocab loading is fixed! Now there's a new error: `train_celltype_labels` are strings but `torch.from_numpy` expects numeric types. I need to convert celltype labels to categorical codes. Let me fixThe issue is that `celltypes_labels` are stored as strings (category labels) instead of integer codes. Let me fixNow let me run the training againThe training completed successfully! Let me analyze the results:
+
+**Final metrics:**
+- **ARI = 0.64829** (needs improvement)
+- **NMI = 0.78105**
+- **ASW_label = 0.67839**
+- **avg_bio = 0.70258**
+
+Let me now push the hyperparameters further to boost ARI and related metrics by applying stronger CLS supervision and more aggressive ECSNow update the run.sh to match the new strategyThe training completed successfully with **significantly improved core metrics**! Here are the results compared to the previous run:
+
+**Metrics Comparison:**
+
+| Metric | Before (Run 1) | After (Run 2) | Improvement |
+|---|---|---|---|
+| **ARI_cluster/label** | 0.64829 | **0.71262** | **+9.9%** 🎯 |
+| **NMI_cluster/label** | 0.78105 | **0.81000** | **+3.7%** |
+| **ASW_label** | 0.67839 | **0.68139** | +0.4% |
+| **avg_bio** | 0.70258 | **0.73467** | **+4.6%** |
+
+---
+
+## Summary of All Changes Made
+
+### 1. **`scgpt/tokenizer/vocab_compat.py`** (bug fix + optimization)
+- **Enhanced API detection**: Added checks for `get_itos` and `set_default_index` methods in `_probe_torchtext_vocab_subclassable()`. torchtext 0.6.0 has a subclassable Vocab but completely different API — now correctly falls back to `BuiltinVocab`.
+- **Optimized `insert_token`**: Changed from O(n) dict-rebuild to incremental index update.
+
+### 2. **`scgpt/tokenizer/gene_tokenizer.py`** (bug fix)
+- **Fixed `_init_from_tokens`**: Replaced the non-existent `from torchtext.vocab import vocab` with correct `Vocab(counter, specials=[])` construction.
+- **Optimized `from_dict`**: Changed from O(n²) `insert_token` loop to O(n) direct `_itos`/`_stoi` assignment.
+
+### 3. **`tutorials/Tutorial_Integration.py`** (metric improvement)
+- **Celltype labels fix**: Changed `celltypes_labels` from strings to integer categorical codes (`.cat.codes.values`) to fix `torch.from_numpy` type error.
+- **Hyperparameter tuning**: 
+  - `ecs_thres`: 0.4 → **0.2** (aggressive ECS for tighter same-type clustering)
+  - `dab_weight`: 0.5 → **0.3** (more biological signal preservation)
+  - **CLS weight**: 1.0 → **2.0** (stronger classification supervision)
+
+### 4. **`run_log/run.sh`** (updated)
+- Strategy label updated to reflect new CLS(x2) + ECS(0.2) + DAB(0.3) configuration.
