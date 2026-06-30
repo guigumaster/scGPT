@@ -1,0 +1,27 @@
+## 日志分析结论
+
+**存在异常**
+
+### 异常详情
+
+日志中明确记录了以下错误信息：
+
+```
+Traceback (most recent call last):
+  File ".../Tutorial_Integration.py", line 247, in <module>
+    vocab = GeneVocab.from_file(vocab_file)
+  File ".../scgpt/tokenizer/gene_tokenizer.py", line 125, in from_file
+    with file_path.open("r") as f:
+FileNotFoundError: [Errno 2] No such file or directory: '../save/scGPT_human/vocab.json'
+```
+
+### 原因分析
+
+1. **脚本崩溃未完整执行**：训练脚本 `Tutorial_Integration.py` 在加载词汇表文件时抛出 `FileNotFoundError`，未能完成训练流程。
+2. **路径问题**：脚本尝试访问 `../save/scGPT_human/vocab.json` 文件，但该文件不存在。预训练模型目录中可能缺失了 `vocab.json` 文件。
+3. **虚假的"成功"打印**：外层脚本虽然在异常后仍打印了 `[Step 3] Training completed successfully!`，但实际训练代码并未成功执行。
+4. **无模型输出**：后续 Step 4 中显示 `No best_model.pt found`，进一步印证了训练未能实际运行。
+
+### 结论
+
+上一轮运行存在异常，未能完整无误地执行完毕。
