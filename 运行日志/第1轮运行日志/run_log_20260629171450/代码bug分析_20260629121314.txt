@@ -1,0 +1,27 @@
+## 日志分析
+
+我仔细阅读了 `execute_log.log` 文件，发现以下关键信息：
+
+### 执行过程概览
+1. **Step 0 (环境配置)**: ✅ 正常完成 — CUDA 可用、GPU 内存充足、所有依赖包均已安装
+2. **Step 1 (数据准备)**: ✅ 正常完成 — Norman 数据集已就绪
+3. **Step 2 (训练)**: ❌ **执行失败**
+
+### 错误详情
+
+在 Step 2 训练过程中，脚本调用 `load_pbmc10k()` 下载 PBMC 数据集后，执行到 `scgpt/pbmc_loader.py` 第 208 行时抛出了 **KeyError**：
+
+```
+KeyError: 'gene_symbols'
+```
+
+根本原因：从 GitHub 下载的 `pbmc_metadata.pickle` 文件中不包含名为 `'gene_symbols'` 的列，导致 pandas DataFrame 在尝试访问该列时抛出异常。
+
+最终脚本以 **exit code 1** 退出，并明确输出：
+```
+[2026-06-29 12:13:02] ERROR: Training failed with exit code 1
+```
+
+### 结论
+
+**存在异常**

@@ -1,0 +1,35 @@
+Let me read the end of the log file to see if the pipeline completed fully## 日志分析结论
+
+**结论: "存在异常"**
+
+### 异常问题分析
+
+在日志中发现了明确的运行错误/异常：
+
+**1. AssertionError — Norman 持续预训练阶段崩溃**
+
+```
+scGPT - WARNING - Norman continual pre-training failed: 
+Traceback (most recent call last):
+  File "scgpt/norman_pretrain.py", line 322, in continual_pretrain_norman
+    output_dict = model(...)
+  File "scgpt/model/model.py", line 220, in _check_batch_labels
+    assert batch_labels is not None
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+```
+
+核心原因：Norman 数据集只有 2 个基因与模型词表（60697 个基因）匹配，`max_seq_len` 被设为 3，导致训练时 `batch_labels` 为 `None`，触发了 `assert` 断言失败。代码随后回退到直接微调（跳过 Norman 预训练），说明 Norman 预训练环节**未能按设计意图正常执行**。
+
+**2. 大量的 FutureWarning 弃用警告**
+
+- `torch.cuda.amp.autocast` 已弃用
+- `pandas.value_counts` 已弃用
+- `scib.metrics.clustering` 的 `leiden` 参数将变更
+- `scanpy` 的 `set_bad` / `use_highly_variable` 等 API 弃用
+
+虽然这些属于警告而非阻断性错误，但也表明代码存在兼容性问题。
+
+### 执行完整性
+
+尽管最终训练完成了 35 个 epoch 并输出了评估结果（"Pipeline finished"），但由于 Norman 持续预训练阶段以 `AssertionError` 失败，**程序并未按预期设计准确无误地完整执行**，存在明显的执行异常。

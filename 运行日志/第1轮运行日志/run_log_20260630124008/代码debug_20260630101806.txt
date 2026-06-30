@@ -1,0 +1,84 @@
+Let me also look at the norman-related files and other relevant codeNow let me check the model to understand the CCE loss implementation:
+
+Now I have a comprehensive understanding of the codebase and the issues. Let me implement the fixes.
+
+**Summary of changes needed:**
+1. **Fix setuptools bug** (upgrade in run.sh and Python script)
+2. **Enable and optimize Norman pre-training** for better ARI
+3. **Improve hyperparameters** for better core metrics
+4. **Better early stopping and model selection**
+
+Let me first update `run.sh` to fix the setuptools issue and improve GPU selection:
+
+Now let me update the `Tutorial_Integration.py` to improve hyperparameters for better ARI and enable Norman pre-training effectively:
+
+Now let me update the Norman pre-training section to use the new parameters:
+
+Now let me add a safety patch at the top of `Tutorial_Integration.py` for the setuptools issue as a backup, and also update the norman_pretrain.py to use the config-driven mask ratioNow update `norman_pretrain.py` to support config-driven mask ratioNow update the call to `get_adaptive_mask_ratio` in `norman_pretrain.py` to pass configLet me also add the safety patch to `norman_pretrain.py` and `norman_loader.py` since they also use torchLet me verify all the changes so far by reviewing the modified files:
+
+Good. Let me now verify the run.sh is properly updated:
+
+Now let me run the training pipeline to test it:
+
+The setuptools fix worked. Now there's a wandb version compatibility issue. Let me fix it:
+
+Now let me update `run.sh` to also install a compatible wandb version, and re-test:
+
+Let me update the run.sh with the correct wandb versionNeed to fix the wandb API key issue for offline mode. Let me update the scriptThe wandb disabled mode isn't working properly with wandb-core. Let me make the wandb.init call fault-tolerant in the Python scriptNow I need to wrap all wandb calls with the `WANDB_AVAILABLE` flag. Let me find all wandb callsI need to make all wandb calls conditional. Let me do targeted edits:
+
+Now fix the wandb.Image references in the evaluation section:
+
+Now let me run the pipeline again to test
+
+## ✅ Training Completed Successfully!
+
+The pipeline ran to completion with **excellent results**. Here's a summary:
+
+---
+
+### 🎯 Final Evaluation Metrics
+
+| Metric | Value |
+|--------|-------|
+| **ARI_cluster/label** | **0.6899** |
+| **NMI_cluster/label** | **0.8110** |
+| **ASW_label** | **0.7039** |
+| **avg_bio** | **0.7350** |
+| PCR_batch | 0.7184 |
+| graph_conn | 0.9399 |
+
+---
+
+### 📝 Summary of Changes Made
+
+#### 1. **Fixed `setuptools` Python 3.13 compatibility bug** (root cause of previous crash)
+- **`run_log/run.sh`**: Added `pip install --upgrade setuptools` before running training
+- **`tutorials/Tutorial_Integration.py`**: Added a Python-level compatibility shim at the top (`pkgutil.ImpImporter = importlib.machinery.PathFinder`)
+- **`scgpt/norman_pretrain.py`**: Added the same compatibility shim
+
+#### 2. **Enabled and optimized Norman pre-training** (user's key request)
+- **`tutorials/Tutorial_Integration.py`**: Changed `use_norman_pretrain=False` → `True`
+- Set `norman_epochs=5` (conservative to avoid K562 overfitting)
+- Added `norman_lr_scale=0.3` (30% of main LR for safe continual pre-training)
+- Added `norman_mask_ratio=0.55` (higher mask ratio for harder task)
+- **`scgpt/norman_pretrain.py`**: Added support for config-driven fixed mask ratio
+
+#### 3. **Improved hyperparameters for better ARI**
+- Increased `cce_weight` from 0.15 → **0.25** (better cell-type separation via contrastive learning)
+- Decreased `mask_ratio_low` from 0.25 → **0.20** (finer-grained later training)
+- Increased `early_stop_patience` from 10 → **15** (allows more convergence)
+
+#### 4. **Made wandb optional** (handles missing API key gracefully)
+- Added `WANDB_AVAILABLE` flag with graceful fallback to dict-based config
+- All wandb calls are conditionally executed
+
+#### 5. **Enhanced GPU selection and dependency management in `run.sh`**
+- Auto-selects GPU with most free memory
+- Installs compatible `wandb` version for numpy 2.x
+
+---
+
+### 📂 Files Modified
+1. `run_log/run.sh` - Setuptools upgrade, wandb compat, GPU auto-selection
+2. `tutorials/Tutorial_Integration.py` - Norman enabled, hyperparams, wandb fallback, setuptools patch
+3. `scgpt/norman_pretrain.py` - Config-driven mask ratio, setuptools patch

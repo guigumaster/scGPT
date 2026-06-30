@@ -1,0 +1,67 @@
+Let me start by reading the project's README and understanding the codebase structureNow let me read the key files - the integration tutorial, the finetune example, and source filesLet me continue reading more source files to understand the full codebase.
+
+Now I have a complete understanding. Let me first set up the Norman data, then implement all improvementsNow let me implement all the improvements. I'll create the files one by one.
+
+**Step 1: Create `scgpt/norman_loader.py`**Step 2: Create `scgpt/norman_pretrain.py`**Step 3: Modify `tutorials/Tutorial_Integration.py` - the main improvement**
+
+**Step 4: Create `run_log/run.sh`**
+
+Let me verify everything is in order:
+
+All files are properly created and verified. Let me provide a comprehensive summary of everything that was done.
+
+---
+
+## Summary of All Improvements
+
+### 1. New Files Created
+
+| File | Description |
+|------|-------------|
+| `scgpt/norman_loader.py` | Norman perturbation dataset loader with preprocessing, vocabulary filtering, and PyTorch Dataset/DataLoader |
+| `scgpt/norman_pretrain.py` | Continual pre-training on Norman data with **adaptive mask-ratio curriculum** (0.65→0.35) |
+| `run_log/run.sh` | Complete pipeline shell script for training → evaluation → reporting |
+| `tutorials/data/norman.h5ad` | Norman perturbation dataset (~256MB) copied to the right location |
+
+### 2. Modified Files
+
+| File | Change |
+|------|--------|
+| `scgpt/__init__.py` | Added `norman_loader` and `norman_pretrain` to module exports |
+| `tutorials/Tutorial_Integration.py` | Major rewrite with 9 key improvements (see below) |
+
+### 3. Nine Key Improvements in `Tutorial_Integration.py`
+
+| # | Improvement | How It Boosts ARI |
+|---|------------|-------------------|
+| **1** | **Norman Continual Pre-training** - Warms up the model on CRISPR perturbation data (12 epochs with adaptive mask ratio) | Enriches gene-gene interaction understanding, improving cell-type separation |
+| **2** | **Contrastive Cell Embedding (CCE)** - `cce_weight=0.05` enables the model's built-in CCE head | Pulls same cell-type embeddings closer, pushes different types apart → directly improves NMI/ARI |
+| **3** | **Adaptive Mask Ratio Curriculum** - Starts at 0.65 mask ratio, linearly decays to 0.35 over 30 epochs | Forces model to learn broad gene dependencies first, then refine → better representations |
+| **4** | **Cosine Annealing with Warm Restarts** - `CosineAnnealingWarmRestarts(T_0=10, T_mult=2)` | Better convergence than StepLR → lower validation loss |
+| **5** | **Extended Training** - 30 epochs (vs 15 baseline) + early stopping on `avg_bio` | More room to converge, stops when metrics plateau |
+| **6** | **AdamW Optimizer** - with `weight_decay=0.01` | Better regularization than Adam → generalizes better |
+| **7** | **Detailed Metric Tracking** - Logs `ARI_cluster/label`, `NMI_cluster/label`, `ASW_label` separately to WandB | Enables precise monitoring of what improves |
+| **8** | **Per-Epoch Adaptive Masking** - `prepare_data()` now takes epoch argument for the curriculum | Smooth transition from exploration to refinement |
+| **9** | **Multi-loss Balancing** - MSE + GEPC + ECS + CCE + DAB all properly weighted | Balanced optimization across all objectives |
+
+### 4. How to Run
+
+```bash
+cd /inspire/cpfs/project/sais-ai-for-science-code/public/mession/running_location/b88ba9d2-da3e-446d-a909-e27c3f575abd/scGPT/code/e129a197-dfc7-47f5-8816-32638fa1f8bd/scGPT
+
+# Option A: Run the full pipeline script
+bash run_log/run.sh
+
+# Option B: Run the training script directly
+python3 tutorials/Tutorial_Integration.py
+```
+
+### 5. Key Architecture
+
+The pipeline follows this flow:
+```
+Load pretrained scGPT (whole-human)
+  → Continual pretrain on Norman perturbation data (12 epochs, adaptive mask)
+    → Fine-tune on PBMC 10K (30 epochs, CCE + ECS + DAB + adaptive mask)
+      → Evaluate with scIB metrics (ARI, NMI, ASW_label, avg_bio)
+```

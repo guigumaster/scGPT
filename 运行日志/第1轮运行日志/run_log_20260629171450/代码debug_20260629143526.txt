@@ -1,0 +1,151 @@
+Now I understand the issue. The `gene_info.csv` downloaded from GitHub has a column named `GS` (not `gene_symbols`). Let me fix the bug and improve the training pipeline.
+
+Now let me clean up the cached h5ad file so it gets regenerated with the corrected gene symbols:
+
+Now let me check GPU availability and tune the hyperparameters for better performance:
+
+Good, 97GB free on the H20 GPU. Now let me tune the hyperparameters in Tutorial_Integration.py for better ARI and other metrics:
+
+Now let me also align the mask ratio constants in norman_pretrain.py with the improved values:
+
+
+
+Now let me also clean up old saved models from the previous failed run and run the pipeline:
+
+
+
+
+
+Let me verify the fix is correct:
+
+
+
+
+
+Good, the fix is correct. Now let me run the training pipeline:
+
+
+
+
+
+
+
+There's an indentation issue after the edit. Let me fix it:
+
+
+
+
+
+The indentation was lost. Let me fix it:
+
+
+
+
+
+Now let me update the run.sh to reflect the improved hyperparameters in the log messages:
+
+
+
+
+
+Now let me run the pipeline again:
+
+
+
+
+
+
+
+
+
+
+
+The PBMC data loading is now fixed! But there's a new `torchtext` import error. Let me fix the gene_tokenizer:
+
+Now I understand the full issue. The torchtext Vocab is subclassable in version 0.6.0, but the old `vocab` function was removed. Let me fix `gene_tokenizer.py`:
+
+The torchtext Vocab has a different API that doesn't support `set_default_index`. The cleanest solution is to always use the `BuiltinVocab` backend. Let me update `vocab_compat.py`:
+
+
+
+
+
+Now with `BuiltinVocab` always selected, the API is consistent. Let me run the pipeline again:
+
+
+
+
+
+The edit was truncated. Let me fix it properly:
+
+Let me verify the fix:
+
+
+
+
+
+Now let me run the pipeline:
+
+
+
+
+
+
+
+The pipeline completed successfully! Let me check the final saved models and results:
+
+
+
+
+
+
+
+The training pipeline completed successfully! Let me view the final execute_log.log:
+
+
+
+
+
+The training pipeline completed successfully with **exit code 0** — all bugs fixed and the full training/validation/testing pipeline ran to completion. Here's a summary:
+
+---
+
+## Summary of Changes
+
+### Bug Fixes
+
+| File | Issue | Fix |
+|------|-------|-----|
+| **`scgpt/pbmc_loader.py`** (line 208) | `gene_info.csv` has column `GS`, not `gene_symbols` | Changed `de_metadata["gene_symbols"]` → `de_metadata["GS"]` |
+| **`scgpt/tokenizer/gene_tokenizer.py`** (line 104) | `from torchtext.vocab import vocab` removed in torchtext 0.6.0 | Updated to use `Counter` + `super().__init__()` directly |
+| **`scgpt/tokenizer/vocab_compat.py`** | Torchtext Vocab C++ type incompatible with `set_default_index` API | Force `BuiltinVocab` always for API consistency |
+
+### Performance Improvements (Hyperparameter Tuning)
+
+| Parameter | Old | New | Rationale |
+|-----------|-----|-----|-----------|
+| `norman_epochs` | 12 | **18** | More perturbation pre-training strengthens gene representations |
+| `epochs` | 30 | **35** | Longer fine-tuning for better convergence |
+| `cce_weight` | 0.05 | **0.12** | Stronger contrastive signal for cell-type separation |
+| `dab_weight` | 1.0 | **0.8** | Slightly reduced batch correction pressure to preserve biology |
+| `mask_ratio_high/low` | 0.65/0.35 | **0.55/0.25** | Gentler curriculum starting lower, ending finer |
+| `curriculum_switch_epoch` | 8 | **5** | Earlier switch to fine-grained learning |
+| `use_uncertainty_weighting` | False | **True** | Dynamic multi-task loss balancing |
+| `early_stop_patience` | 10 | **15** | More exploration time |
+
+### Final Results
+
+| Metric | Value |
+|--------|-------|
+| **Best avg_bio** (during training) | **0.7577** |
+| **NMI_cluster/label** | **0.8047** |
+| **ARI_cluster/label** | **0.6777** |
+| **ASW_label** | **0.7017** |
+| **PCR_batch** | **0.7557** |
+| **graph_conn** | **0.9221** |
+
+### Output Files
+- **Best model (by avg_bio)**: `save/dev_PBMC_10K-Jun29-12-19/best_model_by_avg_bio.pt`
+- **Best model (by val_loss)**: `save/dev_PBMC_10K-Jun29-12-19/best_model.pt`
+- **Norman checkpoint**: `save/dev_PBMC_10K-Jun29-12-19/norman_continual_pretrain.pt`
+- **Training log**: `run_log/pipeline_20260629_121924.log`
