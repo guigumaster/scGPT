@@ -1,0 +1,30 @@
+## 日志分析结果
+
+通过分析 **execute_log.log**，发现以下关键问题：
+
+### 步骤执行情况
+
+| 步骤 | 状态 | 说明 |
+|------|------|------|
+| Step 1: GPU 选择 | ✅ 正常 | 选择 GPU 0 (96721MiB 空闲) |
+| Step 2: 预训练模型检查 | ⚠️ 警告 | 预训练模型 scGPT_human 不存在，但脚本尝试继续运行 |
+| Step 3: 依赖检查 | ✅ 正常 | pertpy 和 scib 均可用 |
+| Step 4: 数据目录准备 | ✅ 正常 | 目录创建完成 |
+| **Step 5: 两阶段训练** | **❌ 异常** | **wandb.init() 崩溃** |
+| Step 6: 结果收集 | ⚠️ 警告 | 未找到 PBMC 10K 保存目录 |
+
+### 关键错误信息
+
+训练脚本 `Tutorial_Integration.py` 在第 104 行执行 `wandb.init()` 时崩溃，堆栈跟踪摘要：
+
+```
+wandb.errors.errors.UsageError: No API key configured. Use `wandb login` to log in.
+```
+
+**训练实际持续了仅 29 秒**（远低于两阶段共 30 个 epoch 所需的正常时间），说明训练根本没有真正启动，在 wandb 初始化阶段就失败了。
+
+Stage 1 (Norman Continual Pretraining) 和 Stage 2 (PBMC 10K Integration Fine-tuning) **均未执行**。
+
+---
+
+## 结论: "存在异常"

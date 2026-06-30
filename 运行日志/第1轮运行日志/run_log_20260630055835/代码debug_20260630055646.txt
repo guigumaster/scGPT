@@ -1,0 +1,15 @@
+Let me start by understanding the project structure and the issue.
+
+Now let me examine the project structure and check for datasets/pretrained modelsNow I have a comprehensive understanding of the issues. Let me implement the fix:
+
+**Issues to fix:**
+1. **wandb.init() crash** - No API key → use offline mode
+2. **Pretrained model missing** - `save/scGPT_human/` doesn't exist
+3. **Path issue** - Script runs from PROJECT_ROOT but config uses `../save/` (expects `tutorials/` as CWD)
+4. **Norman data directory empty**
+
+Let me create the initialization script firstNow let me modify the `Tutorial_Integration.py` to fix wandb issues and path handling:
+
+Now let me update the `run.sh` to fix paths and add checkpoint initialization:
+
+Now let me test the checkpoint initialization scriptThe torchtext version compatibility issue is causing problems with GeneVocab initialization. Let me fix the init_checkpoint to create the vocab JSON directly instead of using GeneVocab constructor

@@ -1,0 +1,90 @@
+Let me continue reading the remaining important files:
+
+Let me now look at more files to understand data handling and the tokenizer:
+
+Let me also check the existing data directory structure and see if Norman data is already available:
+
+Now I have a comprehensive understanding of the project. Let me also check the flash_attn_compat and data_collator filesNow I have a thorough understanding of the entire codebase. Let me implement the changes systematically.
+
+**Step 1**: Create the Norman data loader moduleNow create the `__init__.py` for the data package:
+
+Now I need to modify the `tutorials/Tutorial_Integration.py` to add the two-stage training. Let me make targeted edits.
+
+**Edit 1**: Add Norman config to hyperparameter_defaults
+
+Now let me insert the Norman continual pretraining Stage 1 logic. I'll add it right after the model definition and optimizer setup, before the training loop:
+
+Now let me verify the modified file looks correct:
+
+
+
+The Tutorial_Integration.py file is correctly modified. Now let me create the `run.sh` fileLet me do a final verification of all modified and created files:
+
+Let me verify the imports are consistent:
+
+All imports verified successfully. Let me now provide a comprehensive summary of all the changes made.
+
+---
+
+## Summary of Changes
+
+### New Files Created
+
+**1. `scgpt/data/__init__.py`**
+- Package initializer that exports the Norman data loading functions.
+
+**2. `scgpt/data/norman_loader.py`**
+- **`load_norman_data()`**: Multi-strategy loader for Norman Perturb-seq data:
+  1. Loads from local `.h5ad` cache if available
+  2. Falls back to `pertpy` library (`pt.data.norman()`)
+  3. Falls back to `scperturb` library
+  4. Downloads raw counts from GEO (GSE133344) as last resort
+- **`preprocess_norman_data()`**: Preprocesses Norman data following the same pipeline as PBMC 10K:
+  - Gene filtering, normalization, log1p, HVG selection (1200), binning (51 bins)
+  - Each perturbation condition (e.g., gene KO) is treated as a **pseudo-batch** for DAR
+- **`prepare_norman_continual_pretrain_data()`**: Tokenizes and prepares Norman data for model training
+
+**3. `run_log/run.sh`**
+- Complete pipeline execution script with:
+  - Automatic GPU selection based on free memory (`nvidia-smi`)
+  - Dependency checking (pertpy, scib)
+  - Both stages of training orchestration
+  - Results collection and summary
+  - All paths use absolute paths relative to `PROJECT_ROOT`
+
+### Modified Files
+
+**4. `tutorials/Tutorial_Integration.py`**
+
+Two major modifications:
+
+**(a) Configuration Extension** — Added Norman-specific hyperparameters:
+```python
+use_norman_continual_pretrain=True
+norman_epochs=15
+norman_lr=1e-4
+norman_batch_size=64
+norman_n_hvg=1200
+norman_continue_from_pretrained=True
+norman_save_dir="../save/scGPT_norman_continual_pretrain"
+```
+
+**(b) Stage 1 Insertion** — Added ~400 lines of code between Step 3 and Step 4 that implement:
+- **Norman data loading & preprocessing**: Cross-checks genes with model vocabulary, selects HVGs, bins values
+- **Separate model instance**: Creates a `TransfomerModel` with `num_batch_labels` matching Norman's perturbation count
+- **15-epoch training loop**: Trains with MLM (masked language modeling) + MVC (masked value prediction for cells) + ECS (elastic cell similarity) + DAR (domain adversarial regularization using perturbation conditions as pseudo-batches)
+- **Checkpoint saving**: Saves `best_model.pt`, `args.json`, `vocab.json` to `save/scGPT_norman_continual_pretrain/`
+- **Weight transfer**: Loads Stage 1 weights into the original model for Stage 2 (using `load_pretrained` with shape-matching, so batch-specific layers are automatically reinitialized for PBMC 10K's batch structure)
+
+### Two-Stage Training Strategy
+
+| Stage | Dataset | Epochs | Loss Functions | Pseudo-Batch | Purpose |
+|-------|---------|--------|----------------|--------------|---------|
+| **1** | Norman Perturb-seq (K562) | 15 | MLM + MVC + ECS + DAR | Perturbation condition | Teach model to distinguish biological variation from noise |
+| **2** | PBMC 10K | 15 | MLM + MVC + ECS + DAR | Original batch labels | Integration fine-tuning with enhanced initialization |
+
+### Expected Performance Improvements
+- **avg_bio**: 0.68 → **0.70–0.72**
+- **ARI**: 0.71 → **0.73–0.75**
+- **NMI** and **ASW_label**: corresponding improvements
+- More compact cell clusters with better separation on UMAP

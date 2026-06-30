@@ -1,0 +1,32 @@
+## 日志分析结果
+
+通过对 `execute_log.log` 的分析，发现以下问题：
+
+### 1. Step 2 - 初始化预训练检查点失败
+```
+File "scripts/init_checkpoint.py", line 281, in main
+    vocab = create_vocab(save_dir)
+NameError: name 'create_vocab' is not defined. Did you mean: 'create_vocab_json'?
+```
+`init_checkpoint.py` 中调用了未定义的函数 `create_vocab`，导致脚本执行出错。
+
+### 2. Step 5 - 两阶段训练核心流程崩溃
+```
+File "tutorials/Tutorial_Integration.py", line 218, in <module>
+    adata = scvi.data.pbmc_dataset()
+AttributeError: module 'scvi' has no attribute 'data'
+```
+训练脚本执行时因 `scvi.data` 不存在而抛出 `AttributeError` 异常，**两阶段训练实际上并未执行**。
+
+### 3. 训练时长异常
+训练报告仅耗时 **29 秒**（正常需要数小时），说明训练在启动后立即崩溃退出。
+
+### 4. 无模型产出
+```
+No .pt files found
+```
+没有任何模型权重文件被保存，进一步印证训练未能正常执行。
+
+---
+
+**结论: "存在异常"**
