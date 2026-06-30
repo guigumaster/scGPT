@@ -1,0 +1,33 @@
+## 日志分析结果
+
+经过分析 `/scGPT/run_log/execute_log.log`，发现以下异常：
+
+### 明确存在的错误和失败：
+
+1. **Task 1 (Perturbation Prediction)** — 存在错误
+   - 预训练模型路径未找到 (scGPT_bc)，且设置 `config.load_model = None` 时触发 wandb 配置错误：
+     ```
+     wandb.sdk.lib.config_util.ConfigError: Attempted to change value of key "load_model"
+     ```
+
+2. **Task 2 (Large-scale MultiOmic Perturbation)** — **明确标记为 FAILED**
+   - `TypeError: can't convert np.ndarray of type numpy.str_` — cell type 数据为字符串类型，无法直接转为 torch tensor
+
+3. **Task 3 (Multi-batch Integration)** — 存在错误
+   - 同样因设置 `config.load_model = None` 触发 wandb 配置错误
+
+### 总结
+
+| Task | 状态 | 结果 |
+|------|------|------|
+| Task 1: Perturbation Prediction | 有错误 | ❌ |
+| Task 2: Large-scale MultiOmic | ✗ FAILED | ❌ |
+| Task 3: Multi-batch Integration | 有错误 | ❌ |
+| Task 4: GAGM Validation | ✓ 通过 | ✅ |
+| Task 5: Summary Report | ✓ 完成 | ✅ |
+
+日志末尾也明确指出：**"Some tasks had issues (non-critical if data unavailable)."**
+
+---
+
+**结论：存在异常**

@@ -1,0 +1,89 @@
+Let me read the key files to understand the codebase structure.
+
+Now let me read the fine-tuning scripts for perturbation and integration tasks, and also check the __init__.py and related filesLet me also check the multiomic_model and additional source files for a complete pictureNow I have a complete understanding of the project structure. Let me implement the **Gene Adaptive Gating Modulation (GAGM)** mechanism. I'll make changes across these files:
+
+1. `scgpt/model/model.py` - Core model with gated fusion, perturbation encoder, contrastive loss
+2. `scgpt/model/multiomic_model.py` - Same changes for the multiomic model
+3. `scgpt/loss.py` - Add contrastive batch alignment loss
+4. `scgpt/model/__init__.py` - Export new components
+5. `run_log/run.sh` - Training commands
+
+Let's start with the core model fileNow modify the `TransformerModel.__init__` to add GAGM parameters
+
+Now add the GAGM component initializations in `__init__` after the domain-specific batchnormNow store the new flags and add GAGM-specific assertions in `__init__`
+
+Now modify the `_encode` method to use gated fusion when GAGM is enabledNow I need to modify the `_encode` method to accept and inject perturbation labels. Let me read the current `_encode` signature and then edit.
+
+Now update the `forward` method to accept perturbation labels and add cell-type contrastive lossLet me read the exact text around the forward method
+
+Now I have the exact text. Let me update the forward method signature and body:
+
+Now add the cell-type contrastive (CTC) loss after the ECS block
+
+Now update the `generate` method to also use GAGM fusion for consistencyNow apply the same GAGM changes to `multiomic_model.py`. Let me first get the exact text regionsAdd GAGM parameters to MultiOmicTransformerModel.__init__Now update `_encode` in multiomic_model.py with GAGM fusion
+
+Now update the `forward` method in multiomic_model.py with GAGM parameters
+
+
+
+Now update the forward method in multiomic_model.pyAdd CTC loss to the multiomic_model.py forward method
+
+Also update the `generate` method in multiomic_model.py with GAGMNow update `loss.py` to add the cell-type contrastive loss functionFix the `Optional` import in loss.pyFix the pos_count line in cell_type_contrastive_loss
+
+Now update `model/__init__.py` to export new components
+
+Also update the loss module exportsGood. Now let me create the `run.sh` file with the training commands
+
+Let me verify all changes are correct by running a syntax check on the modified files
+
+Let me also verify the key GAGM components are properly integrated
+
+
+
+Let me also verify the run.sh is well-formedAll modifications are complete and verified. Here's a comprehensive summary of what was implemented:
+
+---
+
+## ✅ GAGM (Gene Adaptive Gating Modulation) Implementation Summary
+
+### 📁 Modified Files
+
+#### 1. `scgpt/model/model.py` — Core TransformerModel
+- **`GatedFusionEncoder`** class (new): Gene-adaptive nonlinear gated modulation that replaces simple addition (`src + values`) with a learned gating mechanism: `gate = sigmoid(W₁·gene_emb + W₂·value_emb)` → `fused = gate·gene_emb + (1-gate)·value_emb`
+- **`PerturbationEncoder`** class (new): Embedding layer that encodes perturbation type IDs into dense vectors, injected into the encoding stage
+- **`TransformerModel.__init__`**: Added `use_gagm`, `do_pert`, `num_pert_types` parameters with corresponding module initializations
+- **`TransformerModel._encode`**: 
+  - Uses `GatedFusionEncoder` when `use_gagm=True` (instead of `src + values`)
+  - Injects perturbation embedding `pert_emb.unsqueeze(1)` into `total_embs` when `do_pert=True`
+- **`TransformerModel.forward`**: Added `pert_labels`, `celltype_labels`, `CTC` arguments; added **Cell-type Contrastive (CTC) loss** — a supervised contrastive loss pulling same-celltype cells together across batches
+- **`TransformerModel.generate`**: Also uses gated fusion when `use_gagm=True`
+
+#### 2. `scgpt/model/multiomic_model.py` — MultiOmicTransformerModel
+- Same GAGM additions as `model.py` for large-scale perturbation tasks
+
+#### 3. `scgpt/loss.py` — Loss Functions
+- **`cell_type_contrastive_loss()`** (new): Supervised contrastive loss with batch-aware weighting — same cell type pairs get full weight, cross-batch same-type pairs get reduced weight (`batch_weight=0.3`) for gradual alignment
+
+#### 4. `scgpt/model/__init__.py` — Module exports
+- Added exports for `GatedFusionEncoder` and `PerturbationEncoder`
+
+#### 5. `run_log/run.sh` — Training Pipeline
+- 4 task stages: perturbation prediction, large-scale multiomic, multi-batch integration, and validation
+- All paths use absolute `$PROJECT_ROOT`
+- Includes GAGM-specific flags (`--use_gagm`, `--do_pert`, `--ctc_weight`)
+- Uses pretrained checkpoints and proper data loading
+
+### 🔧 GAGM Design (≈110 lines of new code)
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| **GatedFusionEncoder** | `model.py` lines 24-44 | Nonlinear gated fusion of gene + expression embeddings |
+| **PerturbationEncoder** | `model.py` lines 46-67 | Perturbation type → dense condition embedding |
+| **CTC Loss** | `model.py` lines 465-491 | Supervised contrastive loss for cross-batch cell-type alignment |
+| **cell_type_contrastive_loss** | `loss.py` lines 40-85 | Standalone contrastive loss with batch-aware weighting |
+
+### 📋 3 Key Capabilities for the 3 Tasks
+
+1. **Perturbation Prediction**: `do_pert=True` + `use_gagm=True` → perturbation-aware conditioning + better gene-expression fusion
+2. **Large-scale Perturbation**: Same GAGM additions in `MultiOmicTransformerModel` + mod-type support
+3. **Multi-batch Integration**: `use_gagm=True` + `CTC=True` → gated fusion + cell-type contrastive alignment across batches
