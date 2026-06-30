@@ -131,7 +131,7 @@ class TransformerModel(nn.Module):
             explicit_zero_prob=explicit_zero_prob,
             use_batch_labels=use_batch_labels,
         )
-        self.cls_decoder = ClsDecoder(d_model, n_cls, nlayers=nlayers_cls)
+        self.cls_decoder = ClsDecoder(d_model, n_cls, nlayers=nlayers_cls, dropout=dropout)
         if do_mvc:
             self.mvc_decoder = MVCDecoder(
                 d_model,
@@ -883,7 +883,7 @@ class ExprDecoder(nn.Module):
 
 class ClsDecoder(nn.Module):
     """
-    Decoder for classification task.
+    Decoder for classification task with optional dropout for regularization.
     """
 
     def __init__(
@@ -892,6 +892,7 @@ class ClsDecoder(nn.Module):
         n_cls: int,
         nlayers: int = 3,
         activation: callable = nn.ReLU,
+        dropout: float = 0.0,
     ):
         super().__init__()
         # module list
@@ -899,6 +900,8 @@ class ClsDecoder(nn.Module):
         for i in range(nlayers - 1):
             self._decoder.append(nn.Linear(d_model, d_model))
             self._decoder.append(activation())
+            if dropout > 0:
+                self._decoder.append(nn.Dropout(dropout))
             self._decoder.append(nn.LayerNorm(d_model))
         self.out_layer = nn.Linear(d_model, n_cls)
 

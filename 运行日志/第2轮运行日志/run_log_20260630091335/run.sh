@@ -1,28 +1,23 @@
 #!/bin/bash
 # =============================================================================
-# scGPT Fine-tuning with CLS Curriculum Learning - Run Script v3
+# scGPT Fine-tuning with CLS Curriculum Learning - Run Script v2
 # =============================================================================
 # Description: This script runs the scGPT fine-tuning with activated cell type
 #              classification head (CLS) and improved curriculum learning.
 #              
-# Key improvements in v3:
-# 1. Sigmoid-based CLS weight ramp from ~0.02 to 0.7 (faster, stronger CLS)
-# 2. 80 training epochs for optimal CLS convergence
-# 3. LR warmup (linear, first 5 epochs) for stable training
-# 4. More HVGs (2000 vs 1200) for richer gene information
-# 5. Lower ECS threshold (0.5 vs 0.6) for more informative similarity pairs
-# 6. ClsDecoder with dropout (0.2) for regularization
-# 7. Gradient accumulation (2 steps) for effective batch size 64
-# 8. Early stopping (patience=15) to prevent overfitting
-# 9. Label smoothing (0.1) for better classification generalization
-# 10. Model selection based on avg_bio (ARI+NMI+ASW_label)
-# 11. Fixed deprecated torch.cuda.amp.autocast API
-# 12. igraph flavor for faster leiden clustering
+# Key improvements in v2:
+# 1. Sigmoid-based CLS weight ramp from ~0.02 to 0.5 (smoother start)
+# 2. 50 training epochs for better CLS convergence
+# 3. Lower ECS threshold (0.6) for more informative similarity pairs
+# 4. Higher learning rate (1e-4) for faster CLS head adaptation
+# 5. Model selection based on avg_bio (ARI+NMI+ASW_label)
+# 6. Label smoothing (0.1) for better classification generalization
+# 7. AdamW optimizer with weight decay (1e-5) for regularization
 #
-# Expected improvements over v2 (ARI=0.8231):
-# - ARI: 0.8231 -> 0.85+ (further refinement)
-# - NMI: improved with more epochs and stronger CLS signal
-# - ASW_label: improved with better cell type separation
+# Expected improvements:
+# - ARI: 0.5092 → 0.70+ (significant recovery and improvement)
+# - NMI: 0.6511 → 0.70+
+# - ASW_label: 0.6877 → 0.72+
 # =============================================================================
 
 set -e
@@ -73,7 +68,7 @@ select_gpu() {
 
 # ====================== Main Execution ======================
 
-log "=== scGPT Fine-tuning with CLS Curriculum Learning (v3) ==="
+log "=== scGPT Fine-tuning with CLS Curriculum Learning (v2) ==="
 log "Project Root: ${PROJECT_ROOT}"
 log "Pretrained Model: ${PRETRAINED_MODEL_DIR}"
 log "Training Script: ${TRAIN_SCRIPT}"
@@ -128,20 +123,16 @@ python3 -c "import torch; print(f'PyTorch {torch.__version__}, CUDA available: {
 python3 -c "import scgpt; print(f'scGPT loaded from local source')" 2>/dev/null || log "scGPT loaded"
 log ""
 
-# Step 3: Run training with CLS curriculum learning (v3)
-log "[Step 3] Starting fine-tuning with CLS curriculum learning (v3)..."
+# Step 3: Run training with CLS curriculum learning
+log "[Step 3] Starting fine-tuning with improved CLS curriculum learning..."
 log "  - Cell type classification head: ENABLED (n_cls=num_types)"
-log "  - Curriculum learning: Sigmoid-ramp CLS weight ~0.02 -> 0.7"
+log "  - Curriculum learning: Sigmoid-ramp CLS weight ~0.02 → 0.5"
 log "  - Label smoothing: 0.1 for better generalization"
 log "  - Optimizer: AdamW with weight_decay=1e-5"
 log "  - Scheduler: CosineAnnealingLR (eta_min=lr*0.01)"
-log "  - Epochs: 80 | Batch size: 32 (effective 64 via grad accum) | LR: 1e-4"
-log "  - LR warmup: Linear, first 5 epochs"
-log "  - HVGs: 2000 (vs 1200 in v2) for richer gene information"
-log "  - Mask ratio: 0.35 | ECS threshold: 0.5 | DAB weight: 1.0"
-log "  - ClsDecoder dropout: 0.2 for regularization"
+log "  - Epochs: 50 | Batch size: 32 | LR: 1e-4"
+log "  - Mask ratio: 0.35 | ECS threshold: 0.6 | DAB weight: 1.0"
 log "  - Model selection: Best avg_bio (ARI+NMI+ASW_label)"
-log "  - Early stopping: patience=15 evaluations"
 log ""
 
 # Run the training script
@@ -174,20 +165,15 @@ log ""
 
 # Step 5: Summary
 log "=== Summary ==="
-log "Training complete. Key improvements in this run (v3):"
+log "Training complete. Key improvements in this run (v2):"
 log "  1. Cell type classification head (ClsDecoder) activated with n_cls=num_types"
-log "  2. Sigmoid curriculum learning: CLS weight ~0.02 -> 0.7 (faster ramp, stronger signal)"
-log "  3. Label smoothing (0.1) on classification loss"
-log "  4. Lower ECS threshold (0.5) for more positive similarity pairs"
+log "  2. Sigmoid-based curriculum learning: CLS weight ~0.02 → 0.5"
+log "  3. Label smoothing (0.1) on classification loss for better generalization"
+log "  4. Lower ECS threshold (0.6) for more positive similarity pairs"
 log "  5. AdamW optimizer with weight decay (1e-5) + CosineAnnealingLR scheduler"
-log "  6. 80 epochs with model selection by avg_bio (best integration metric)"
-log "  7. LR warmup (linear, 5 epochs) for stable convergence"
-log "  8. 2000 HVGs (vs 1200) for richer gene information"
-log "  9. ClsDecoder dropout (0.2) for regularization"
-log "  10. Gradient accumulation (2 steps) for effective batch size 64"
-log "  11. Early stopping (patience=15) to prevent overfitting"
-log "  12. Fixed deprecated torch.cuda.amp.autocast API"
-log "  13. Expected ARI improvement: 0.8231 -> 0.85+"
+log "  6. 50 epochs with model selection by avg_bio (best integration metric)"
+log "  7. Higher LR (1e-4) for faster CLS head convergence"
+log "  8. Expected ARI improvement: 0.5092 → 0.70+"
 log ""
 log "Logs saved to: ${LOG_DIR}"
 log "Models saved to: ${SAVE_DIR}"

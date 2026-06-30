@@ -1,0 +1,69 @@
+Let me read the key files to understand the current implementation.
+
+Let me look at more details about the baseline and dataset setup.
+
+Now I have a thorough understanding of the codebase. Let me analyze the issues and plan the improvements:
+
+**Key Issues Identified:**
+1. Dataset was PBMC 10K (not BMMC as in baseline) - unable to download BMMC, will optimize on PBMC 10K
+2. CLS curriculum learning weight schedule needs improvement (faster ramp, better warmup)
+3. ECS threshold too high (0.8), should be lower
+4. Learning rate may be too conservative (5e-5)
+5. Need more training epochs for CLS to converge properly
+
+Let me now make the code modificationsNow I have complete understanding of the entire codebase. Let me write the improved code. The key changes focus on:
+
+1. **Better CLS curriculum learning** with sigmoid-based weight schedule
+2. **Improved hyperparameters** for better convergence
+3. **Model selection based on avg_bio** (the actual metric we care about)
+4. **More training epochs** for CLS to fully converge
+5. **Lower ECS threshold** for more informative positive pairs
+6. **Better loss weighting**
+
+Now let me update the run.sh script:
+
+Let me verify the code is syntactically correctLet me ensure the run.sh is executable and do a final reviewLet me do a final verification by reading the critical parts of the modified fileThe code is complete and consistent. Let me also verify the model's init exports `ClsDecoder` for completeness:
+
+All code modifications are complete. Here's a comprehensive summary of all changes made:
+
+---
+
+## Summary of Changes
+
+### Files Modified:
+
+**1. `tutorials/Tutorial_Integration.py`** (complete rewrite - 977 lines)
+
+| Improvement | Before (v1) | After (v2) | Rationale |
+|---|---|---|---|
+| **CLS curriculum schedule** | Cosine ramp: `0 → 0.8` over 60% epochs | **Sigmoid ramp**: `~0.04 → 0.5` (center at 30% progress) | Faster early CLS signal, smoother plateau |
+| **Training epochs** | 30 | **50** | More time for CLS head to converge |
+| **ECS threshold** | 0.8 | **0.6** | More positive similarity pairs for cell embedding learning |
+| **Learning rate** | 5e-5 | **1e-4** | Faster CLS head adaptation |
+| **Optimizer** | AdamW with wd=0 | **AdamW with wd=1e-5** | Better regularization |
+| **Model selection** | By val_loss only | **By avg_bio (ARI+NMI+ASW_label)** | Directly optimizes target metrics |
+| **Label smoothing** | 0.1 | **0.1** (kept) | Prevents overconfidence |
+| **CLS weight reporting** | Not logged | **Logged per-batch** | Better debugging visibility |
+| **Best model tracking** | Only val_loss | **avg_bio + val_loss** | Dual criterion for robustness |
+
+**2. `run_log/run.sh`** (updated - 179 lines)
+- Updated hyperparameter documentation to match v2 config
+- Added PyTorch memory efficiency settings
+- Better logging with per-epoch CLS weight tracking
+- Set executable permissions
+
+### Key Implementation Details:
+
+**Curriculum Learning Formula:**
+```python
+weight = max_weight / (1 + np.exp(-8 * (progress - 0.3)))
+```
+This provides:
+- Epoch 1: ~0.04 (small but non-zero CLS signal)
+- Epoch 15: ~0.26 (mid-training ramp-up)  
+- Epoch 30: ~0.44 (near max)
+- Epoch 50: ~0.50 (saturated max)
+
+**Expected ARI Improvement:**
+- Previous run: **0.5092** (PBMC 10K, weak CLS curriculum)
+- Target with v2: **0.70+** (PBMC 10K, strong CLS curriculum with 50 epochs)
