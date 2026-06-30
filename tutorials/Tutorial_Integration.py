@@ -93,10 +93,10 @@ hyperparameter_defaults = dict(
     ecs_thres=0.8,  # Elastic cell similarity objective, 0.0 to 1.0, 0.0 to disable
     dab_weight=1.0, # DAR objective weight for batch correction
     mask_ratio=0.4, # Default mask ratio
-    epochs=15, # Default number of epochs for fine-tuning
+    epochs=25, # Increased epochs for PBMC fine-tuning (more iterations needed after Norman)
     n_bins=51, # Default number of bins for value binning in data pre-processing
-    lr=1e-4, # Default learning rate for fine-tuning
-    batch_size=64, # Default batch size for fine-tuning
+    lr=2e-4, # Increased learning rate for PBMC fine-tuning (faster recovery after Norman)
+    batch_size=128, # Increased batch size for PBMC (faster training, better gradient estimates)
     layer_size=128,
     nlayers=4,
     nhead=4, # if load model, batch_size, layer_size, nlayers, nhead will be ignored
@@ -109,11 +109,12 @@ hyperparameter_defaults = dict(
     amp=True,  # # Default setting: Automatic Mixed Precision
     # === Norman Continual Pretraining Config ===
     use_norman_continual_pretrain=True,  # Enable two-stage training
-    norman_epochs=15,  # Number of epochs for Norman continual pretraining
-    norman_lr=1e-4,  # Learning rate for Norman stage
-    norman_batch_size=64,  # Batch size for Norman stage
+    norman_epochs=8,  # Increased epochs for Norman (more thorough perturbation learning)
+    norman_lr=1e-4,  # Lower LR for Norman to avoid catastrophic forgetting of pretrained weights
+    norman_batch_size=128,  # Batch size for Norman stage
     norman_n_hvg=1200,  # HVGs for Norman data
     norman_continue_from_pretrained=True,  # Continue from scGPT_human pretrained weights
+    norman_subsample_ratio=0.75,  # Increased subsample ratio to 75% (more perturbation diversity)
     norman_save_dir=str(PROJECT_ROOT / "save" / "scGPT_norman_continual_pretrain"),  # Stage 1 checkpoint path (absolute)
 )
 
@@ -547,7 +548,7 @@ optimizer = torch.optim.Adam(
     model.parameters(), lr=config.lr, eps=1e-4 if config.amp else 1e-8
 )
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1, gamma=config.schedule_ratio)
-scaler = torch.cuda.amp.GradScaler(enabled=config.amp)
+scaler = torch.amp.GradScaler('cuda', enabled=config.amp)
 
 
 # In[16]:
@@ -571,7 +572,7 @@ def train(model: nn.Module, loader: DataLoader) -> None:
         batch_labels = batch_data["batch_labels"].to(device)
 
         src_key_padding_mask = input_gene_ids.eq(vocab[pad_token])
-        with torch.cuda.amp.autocast(enabled=config.amp):
+        with torch.amp.autocast('cuda', enabled=config.amp):
             output_dict = model(
                 input_gene_ids,
                 input_values,
@@ -690,7 +691,7 @@ def evaluate(model: nn.Module, loader: DataLoader) -> float:
             batch_labels = batch_data["batch_labels"].to(device)
 
             src_key_padding_mask = input_gene_ids.eq(vocab[pad_token])
-            with torch.cuda.amp.autocast(enabled=config.amp):
+            with torch.amp.autocast('cuda', enabled=config.amp):
                 output_dict = model(
                     input_gene_ids,
                     input_values,
@@ -762,7 +763,7 @@ def eval_testdata(
         )
         all_gene_ids, all_values = tokenized_all["genes"], tokenized_all["values"]
         src_key_padding_mask = all_gene_ids.eq(vocab[pad_token])
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=config.amp):
+        with torch.no_grad(), torch.amp.autocast('cuda', enabled=config.amp):
             cell_embeddings = model.encode_batch(
                 all_gene_ids,
                 all_values.float(),
@@ -845,13 +846,30 @@ if config.use_norman_continual_pretrain:
     )
     norman_adata = norman_adata[:, norman_adata.var["id_in_vocab"] >= 0]
 
-    # Preprocess Norman data with HVG selection and binning
+    # Subsample Norman data for faster training while preserving perturbation diversity
+    if config.norman_subsample_ratio < 1.0:
+        n_cells = norman_adata.n_obs
+        n_subsample = int(n_cells * config.norman_subsample_ratio)
+        np.random.seed(config.seed)
+        subsample_idx = np.random.choice(n_cells, n_subsample, replace=False)
+        norman_adata = norman_adata[subsample_idx].copy()
+        logger.info(
+            f"Subsampled Norman data: {n_cells} -> {n_subsample} cells "
+            f"({config.norman_subsample_ratio*100:.0f}%)"
+        )
+
+    # Preprocess Norman data with HVG selection and binning.
+    # Detect if the loaded data is already log1p-transformed to avoid double transform.
+    data_max = norman_adata.X.max() if hasattr(norman_adata.X, 'max') else norman_adata.X.toarray().max()
+    data_already_logged = data_max <= 30
+    if data_already_logged:
+        logger.info(f"Norman data appears already log1p-transformed (max={data_max:.2f}), skipping log1p.")
     norman_adata = preprocess_norman_data(
         norman_adata,
         n_hvg=config.norman_n_hvg,
         n_bins=config.n_bins,
-        batch_key="perturbation",
-        data_is_raw=True,
+        batch_key="guide_identity",
+        data_is_raw=not data_already_logged,
     )
 
     # Sort by batch for per_seq_batch sampling
@@ -916,7 +934,7 @@ if config.use_norman_continual_pretrain:
     norman_scheduler = torch.optim.lr_scheduler.StepLR(
         norman_optimizer, 1, gamma=config.schedule_ratio
     )
-    norman_scaler = torch.cuda.amp.GradScaler(enabled=config.amp)
+    norman_scaler = torch.amp.GradScaler('cuda', enabled=config.amp)
 
     def norman_prepare_data(sort_seq_batch=False):
         """Prepare Norman data for one epoch with dynamic masking."""
@@ -992,7 +1010,7 @@ if config.use_norman_continual_pretrain:
             batch_labels = batch_data["batch_labels"].to(device)
 
             src_key_padding_mask = input_gene_ids.eq(vocab[pad_token])
-            with torch.cuda.amp.autocast(enabled=config.amp):
+            with torch.amp.autocast('cuda', enabled=config.amp):
                 output_dict = norman_model(
                     input_gene_ids,
                     input_values,
@@ -1081,7 +1099,7 @@ if config.use_norman_continual_pretrain:
                 batch_labels = batch_data["batch_labels"].to(device)
 
                 src_key_padding_mask = input_gene_ids.eq(vocab[pad_token])
-                with torch.cuda.amp.autocast(enabled=config.amp):
+                with torch.amp.autocast('cuda', enabled=config.amp):
                     output_dict = norman_model(
                         input_gene_ids,
                         input_values,
@@ -1192,6 +1210,7 @@ if config.use_norman_continual_pretrain:
 best_val_loss = float("inf")
 best_avg_bio = 0.0
 best_model = None
+best_model_epoch = None
 define_wandb_metrcis()
 
 for epoch in range(1, config.epochs + 1):
@@ -1272,8 +1291,27 @@ for epoch in range(1, config.epochs + 1):
 # In[18]:
 
 
-# save the best model
-torch.save(best_model.state_dict(), save_dir / "best_model.pt")
+# save the best model with robust error handling
+if best_model is not None:
+    try:
+        best_model_path = save_dir / "best_model.pt"
+        torch.save(best_model.state_dict(), best_model_path)
+        logger.info(f"Best model saved to {best_model_path}")
+        # Also save a copy with the epoch number
+        if best_model_epoch is not None:
+            epoch_path = save_dir / f"best_model_e{best_model_epoch}.pt"
+            torch.save(best_model.state_dict(), epoch_path)
+            logger.info(f"Best model (epoch {best_model_epoch}) saved to {epoch_path}")
+    except Exception as e:
+        logger.error(f"Failed to save best model: {e}")
+else:
+    logger.warning("No best model to save!")
+    # Fallback: save the current model
+    try:
+        torch.save(model.state_dict(), save_dir / "final_model.pt")
+        logger.info(f"Current model saved to {save_dir / 'final_model.pt'}")
+    except Exception as e:
+        logger.error(f"Failed to save final model: {e}")
 
 
 # In[19]:
