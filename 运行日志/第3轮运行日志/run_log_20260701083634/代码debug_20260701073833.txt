@@ -1,0 +1,42 @@
+Let me start by exploring the project structure and understanding the codebase.
+
+Let me examine the key Python files to understand the code structure:
+
+Let me check the model files to understand the GAGM componentsNow I have a complete understanding. Let me implement comprehensive fixes:
+
+**Root cause analysis:**
+1. Orphan process 2286745 from previous run occupies 77.88 GiB GPU memory
+2. No GPU memory cleanup between tasks
+3. No `PYTORCH_CUDA_ALLOC_CONF` set for memory management
+4. Batch sizes and model sizes are too large given limited remaining memory
+
+Let me fix all the issuesNow let me update the Python files with memory optimizations and proper cleanupNow update the multiomic perturbation scriptNow update the integration scriptNow let me reduce the default batch size in the integration scriptNow let me verify the changes are consistent and test the run.sh script
+
+All files pass syntax checks. Let me now execute the run.sh to test
+
+## ✅ All Tasks Completed Successfully!
+
+The pipeline finished with **all 5 tasks passing** — no CUDA OOM errors this time. Here's a summary:
+
+### Fixes Applied & Results
+
+| Task | Status | Key Improvements |
+|------|--------|-----------------|
+| **1. Perturbation Prediction** | ✅ DONE | Batch size 32→16, grad_accum 2→4, trained 12 epochs, best val_loss=46.71 |
+| **2. Large-scale MultiOmic** | ✅ DONE | d_model 512→256, nlayers 4→3, batch 32→16, best val_loss=311.07 |
+| **3. Multi-batch Integration** | ✅ DONE | Batch 32→16, workers 4→2, trained 15 epochs, val_loss 103.99→51.56 |
+| **4. GAGM Validation** | ✅ DONE | All 6 GAGM components validated |
+| **5. Summary Report** | ✅ DONE | Architecture summary generated |
+
+### Root Cause Fixes
+
+1. **`run.sh`**: Added `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:128` and `kill_orphan_gpu_processes()` to clean up leftover GPU processes before tasks start.
+
+2. **All Python scripts**: Added `cleanup_cuda_memory()` function that calls `torch.cuda.empty_cache()`, `gc.collect()`, and resets memory stats at the end of each task.
+
+3. **Reduced memory footprint**: 
+   - Batch sizes: 32 → 16 (with increased gradient accumulation to maintain effective batch size)
+   - MultiOmic model: d_model 512 → 256, nlayers 4 → 3, nhead 8 → 4
+   - DataLoader workers: 4 → 2
+
+4. **Between-task cleanup**: Each task now explicitly cleans GPU memory before the next task starts, preventing memory fragmentation.

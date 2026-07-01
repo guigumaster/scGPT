@@ -781,42 +781,45 @@ class GeneEncoder(nn.Module):
 
 class GatedFusionEncoder(nn.Module):
     """
-    GAGM (Gene Adaptive Gating Modulation) v2 - Enhanced Architecture
+    GAGM (Gene Adaptive Gating Modulation) v3 - Enhanced Architecture
     
     Gene-adaptive nonlinear gated modulation that replaces simple addition
     for fusing gene embeddings and expression values. Enhanced with:
     
-      - Multi-head gating: parallel gate heads with different projections
-        to capture diverse gene-value interactions
-      - Highway-style two-layer gate projection with GELU activation
-      - Learnable gate bias per channel initialized to +2 (sigmoid ~0.88)
-        so initial behavior is close to simple addition (gene + value)
-      - Fusion projection + LayerNorm for stable representations
-      - Residual connection with learnable scale from gene embedding
-      - Dropout on gate outputs for regularization
-      - Better initialization for training stability
+      - Dual-gate mechanism: separate gates for gene and value contributions
+        (asymmetric gating allows more nuanced control)
+      - Learnable gate temperature to control sharpness of gate decisions
+      - GELU-activated two-layer gate projection with normalized initialization
+      - Initial gate bias close to 0.5 (equal gene+value weighting) with
+        small noise perturbation to prevent gate collapse
+      - Fusion projection + LayerNorm + residual for stable representations
+      - Learnable residual connection from gene embedding
+      - Gate regularization hook for computing auxiliary gate loss
     """
 
-    def __init__(self, d_model: int, n_gate_heads: int = 4, gate_dropout: float = 0.1):
+    def __init__(self, d_model: int, gate_dropout: float = 0.1):
         super().__init__()
-        self.n_gate_heads = n_gate_heads
-        head_dim = d_model // n_gate_heads
         
-        # Multi-head gate network: process each head separately
+        # Dual-gate network: produces separate logits for gene gate and value gate
         self.gate_net = nn.Sequential(
             nn.Linear(d_model * 2, d_model),
             nn.GELU(),
             nn.Dropout(gate_dropout),
-            nn.Linear(d_model, d_model),
+            nn.Linear(d_model, d_model * 2),  # 2x output: gene_gate, value_gate
         )
-        # Initialize last layer of gate_net with small weights
+        # Initialize gate network with small weights for stable start
         nn.init.xavier_uniform_(self.gate_net[0].weight, gain=0.5)
         nn.init.zeros_(self.gate_net[0].bias)
         nn.init.xavier_uniform_(self.gate_net[3].weight, gain=0.1)
         nn.init.zeros_(self.gate_net[3].bias)
         
-        # Gate bias: +2 so sigmoid ~0.88 initially (close to gene+value addition)
-        self.gate_bias = nn.Parameter(torch.full((1, 1, d_model), 2.0))
+        # Learnable gate temperature: controls sharpness of sigmoid
+        # Lower temperature -> sharper gates, higher -> softer
+        self.gate_log_temp = nn.Parameter(torch.zeros(1))  # temp=1.0 initially
+        
+        # Initial bias: set so that both gates start near 0.5 (equal weighting)
+        # This gives a smooth start similar to gene+value addition
+        self.gate_bias = nn.Parameter(torch.zeros(1, 1, d_model * 2))
         
         # Post-fusion processing
         self.fusion_norm = nn.LayerNorm(d_model)
@@ -833,8 +836,12 @@ class GatedFusionEncoder(nn.Module):
         nn.init.xavier_uniform_(self.out_proj.weight, gain=0.1)
         nn.init.zeros_(self.out_proj.bias)
         
-        # Learnable residual gate: starts at 0.3 for slightly more contribution from gated fusion
-        self.residual_gate = nn.Parameter(torch.full((1,), 0.3))
+        # Learnable residual connection from gene embedding
+        self.residual_gate = nn.Parameter(torch.full((1,), 0.2))
+        
+        # Store last gate values for auxiliary loss computation
+        self._last_gene_gate = None
+        self._last_value_gate = None
 
     def forward(self, gene_emb: Tensor, value_emb: Tensor) -> Tensor:
         """
@@ -844,13 +851,28 @@ class GatedFusionEncoder(nn.Module):
         Returns:
             fused_emb: Tensor, shape [batch_size, seq_len, d_model]
         """
-        # Multi-head gating
+        # Compute dual gates
         combined = torch.cat([gene_emb, value_emb], dim=-1)  # (B, L, 2*d_model)
-        gate_logits = self.gate_net(combined) + self.gate_bias  # (B, L, d_model)
-        gate = torch.sigmoid(gate_logits)
+        gate_logits = self.gate_net(combined) + self.gate_bias  # (B, L, 2*d_model)
         
-        # Apply gate: gene-adaptive weighted combination
-        fused = gate * gene_emb + (1 - gate) * value_emb
+        # Split into gene gate and value gate logits
+        gene_gate_logits, value_gate_logits = gate_logits.chunk(2, dim=-1)
+        
+        # Apply temperature-scaled sigmoid
+        temperature = torch.exp(self.gate_log_temp)  # ensure positive
+        gene_gate = torch.sigmoid(gene_gate_logits / temperature)
+        value_gate = torch.sigmoid(value_gate_logits / temperature)
+        
+        # Store for auxiliary loss computation
+        self._last_gene_gate = gene_gate
+        self._last_value_gate = value_gate
+        
+        # Asymmetric dual-gate fusion
+        # Normalize so that gene_gate + value_gate is not too large
+        gate_sum = gene_gate + value_gate + 1e-8
+        gene_weight = gene_gate / gate_sum
+        value_weight = value_gate / gate_sum
+        fused = gene_weight * gene_emb + value_weight * value_emb
         
         # Post-fusion processing with residual
         fused = self.fusion_norm(fused)
@@ -861,8 +883,26 @@ class GatedFusionEncoder(nn.Module):
         fused = self.out_proj(fused)
         fused = fused + self.residual_gate * gene_emb
         return fused
-        
 
+    def get_gate_entropy(self) -> Tensor:
+        """
+        Compute entropy of gates to encourage balanced gating.
+        Returns a scalar: higher entropy = more balanced gating.
+        """
+        if self._last_gene_gate is None or self._last_value_gate is None:
+            return torch.tensor(0.0, device=self.gate_log_temp.device)
+        
+        # Compute gate entropy: -p*log(p) - (1-p)*log(1-p)
+        eps = 1e-8
+        gene_entropy = -(
+            self._last_gene_gate * torch.log(self._last_gene_gate + eps)
+            + (1 - self._last_gene_gate) * torch.log(1 - self._last_gene_gate + eps)
+        )
+        value_entropy = -(
+            self._last_value_gate * torch.log(self._last_value_gate + eps)
+            + (1 - self._last_value_gate) * torch.log(1 - self._last_value_gate + eps)
+        )
+        return (gene_entropy.mean() + value_entropy.mean()) / 2
 
 
 class PerturbationEncoder(nn.Module):

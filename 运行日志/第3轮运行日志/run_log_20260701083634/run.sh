@@ -290,9 +290,7 @@ run_integration() {
 
     log "Starting multi-batch integration training with GAGM + CTC..."
 
-    timeout --kill-after=30 ${INTEG_TIMEOUT} python -u "${INTEG_SCRIPT}" \
-        --output_dir "${INTEG_OUTPUT_DIR}" \
-        2>&1 | tee -a "${LOG_FILE}"
+    timeout --kill-after=30 ${INTEG_TIMEOUT} python -u "${INTEG_SCRIPT}" 2>&1 | tee -a "${LOG_FILE}"
     local ret=${PIPESTATUS[0]}
     if [ ${ret} -eq 0 ]; then
         log "✓ Multi-batch integration training completed successfully."

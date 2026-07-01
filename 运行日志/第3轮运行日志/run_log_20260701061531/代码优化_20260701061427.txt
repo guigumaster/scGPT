@@ -1,0 +1,8 @@
+Let me start by thoroughly understanding the project structure and codebase.
+
+Now let me read the core model files and existing finetuning scriptsNow let me read the existing finetune scripts and run.sh files:
+
+Let me read the remaining key filesNow I have a thorough understanding of the codebase. Let me read the remaining utility file for the eval_scib_metrics functionNow I have a complete understanding. Let me implement the improvements systematically. I'll start with the core model changes, then the loss function, then the training scripts.
+
+Let me check the result of the edit:
+

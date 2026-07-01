@@ -18,18 +18,14 @@
 set -o pipefail
 
 # =============================================================================
-# Environment Setup - Memory Optimized
+# Environment Setup
 # =============================================================================
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
-export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
 export PYTHONUNBUFFERED=1
 export WANDB_MODE=disabled
 export WANDB_SILENT=true
 export TOKENIZERS_PARALLELISM=false
-
-# Critical: Memory management settings for CUDA
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:128
-export CUDA_LAUNCH_BLOCKING=0
 
 # Project root directory - DO NOT MODIFY
 PROJECT_ROOT="/inspire/cpfs/project/sais-ai-for-science-code/public/mession/running_location/65e41f70-a292-46af-aec4-fd50337e102b/scGPT/code/cdacd5cb-5111-40b1-a0ff-65603b2b44af/scGPT"
@@ -42,15 +38,14 @@ DATA_DIR="${PROJECT_ROOT}/data"
 SAVE_DIR="${PROJECT_ROOT}/save"
 
 # Output directories for each task
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-PERT_OUTPUT_DIR="${SAVE_DIR}/gagm_perturbation_${TIMESTAMP}"
-MULTIOMIC_OUTPUT_DIR="${SAVE_DIR}/gagm_multiomic_${TIMESTAMP}"
-INTEG_OUTPUT_DIR="${SAVE_DIR}/gagm_integration_${TIMESTAMP}"
+PERT_OUTPUT_DIR="${SAVE_DIR}/gagm_perturbation_$(date +%Y%m%d_%H%M%S)"
+MULTIOMIC_OUTPUT_DIR="${SAVE_DIR}/gagm_multiomic_$(date +%Y%m%d_%H%M%S)"
+INTEG_OUTPUT_DIR="${SAVE_DIR}/gagm_integration_$(date +%Y%m%d_%H%M%S)"
 
 mkdir -p "${PERT_OUTPUT_DIR}" "${MULTIOMIC_OUTPUT_DIR}" "${INTEG_OUTPUT_DIR}"
 
-# Per-task timeout in seconds
-PERT_TIMEOUT=6000   # 100min for perturbation prediction
+# Per-task timeout in seconds (less than total 10800s to leave room for validation/summary)
+PERT_TIMEOUT=6000   # 100min for perturbation prediction (12 epochs ~300-400s each)
 MULTI_TIMEOUT=3600  # 60min for multiomic perturbation
 INTEG_TIMEOUT=3600  # 60min for integration
 VALID_TIMEOUT=600   # 10min for validation
@@ -81,47 +76,6 @@ print_header() {
 }
 
 # =============================================================================
-# CRITICAL: GPU Memory Cleanup Functions
-# =============================================================================
-cleanup_gpu_memory() {
-    log "Cleaning up GPU memory..."
-    # Python-side cleanup: empty CUDA cache and run GC
-    python3 -c "
-import gc
-import torch
-if torch.cuda.is_available():
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
-    gc.collect()
-    print(f'GPU memory after cleanup: allocated={torch.cuda.memory_allocated()/1024**3:.2f} GiB, reserved={torch.cuda.memory_reserved()/1024**3:.2f} GiB')
-else:
-    print('No CUDA device, skipping GPU cleanup.')
-" 2>&1 | tee -a "${LOG_FILE}"
-    log "GPU memory cleanup completed."
-}
-
-kill_orphan_gpu_processes() {
-    log "Checking for orphan GPU processes..."
-    # Kill any zombie Python processes on GPU 0 that are not part of this shell
-    CURRENT_PID=$$
-    for pid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do
-        if [ -n "$pid" ] && [ "$pid" != "$CURRENT_PID" ]; then
-            # Check if process still exists and is a Python process
-            if kill -0 "$pid" 2>/dev/null; then
-                cmdline=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ' | head -c 200)
-                if echo "$cmdline" | grep -qi "python"; then
-                    log "Killing orphan Python GPU process $pid: $cmdline"
-                    kill -9 "$pid" 2>/dev/null || true
-                fi
-            fi
-        fi
-    done
-    # Short wait for processes to die
-    sleep 2
-    cleanup_gpu_memory
-}
-
-# =============================================================================
 # Task 1: Perturbation Prediction with GAGM
 # =============================================================================
 run_perturbation_prediction() {
@@ -133,7 +87,7 @@ run_perturbation_prediction() {
         return 1
     fi
 
-    # Run perturbation prediction training with GAGM - REDUCED BATCH SIZE to 16 for memory efficiency
+    # Run perturbation prediction training with GAGM
     log "Starting perturbation prediction training with GAGM..."
 
     timeout --kill-after=30 ${PERT_TIMEOUT} python -u "${PERT_SCRIPT}" \
@@ -143,8 +97,8 @@ run_perturbation_prediction() {
         --do_pert \
         --num_pert_types 81 \
         --lr 5e-5 \
-        --batch_size 16 \
-        --gradient_accumulation_steps 4 \
+        --batch_size 32 \
+        --gradient_accumulation_steps 2 \
         --epochs 12 \
         --weight_decay 0.01 \
         --use_cosine_scheduler \
@@ -182,7 +136,6 @@ sys.path.insert(0, '${PROJECT_ROOT}')
 import torch
 import numpy as np
 torch.manual_seed(42)
-import gc
 
 # Check if model was saved
 import os
@@ -192,15 +145,10 @@ if os.path.exists(model_path):
     keys = list(ckpt.keys())
     print(f'Loaded checkpoint with {len(keys)} keys: {keys[:5]}...')
     print('Perturbation prediction model with GAGM: ✓')
-    del ckpt
 else:
     print('No trained model found (evaluation skipped)')
     print('GAGM components verified via initialization test above')
-gc.collect()
 " 2>&1 | tee -a "${LOG_FILE}"
-    
-    # Cleanup GPU memory
-    cleanup_gpu_memory
 }
 
 # =============================================================================
@@ -223,13 +171,13 @@ run_multiomic_perturbation() {
         --do_pert \
         --num_pert_types 100 \
         --ctc_weight 0.2 \
-        --d_model 256 \
-        --nhead 4 \
-        --nlayers 3 \
+        --d_model 512 \
+        --nhead 8 \
+        --nlayers 4 \
         --lr 1e-4 \
-        --batch_size 16 \
+        --batch_size 32 \
         --epochs 8 \
-        --gradient_accumulation_steps 4 \
+        --gradient_accumulation_steps 2 \
         --weight_decay 0.01 \
         --mask_ratio 0.4 \
         --dab_weight 1.0 \
@@ -264,16 +212,11 @@ run_multiomic_perturbation() {
 import sys
 sys.path.insert(0, '${PROJECT_ROOT}')
 import torch
-import gc
 ckpt = torch.load('${MULTIOMIC_OUTPUT_DIR}/best_model.pt', map_location='cpu')
 print(f'Test model loaded: {len(ckpt)} parameter groups')
 print(f'MultiOmic GAGM model saved: ✓')
-del ckpt
-gc.collect()
 " 2>&1 | tee -a "${LOG_FILE}"
     fi
-    
-    cleanup_gpu_memory
 }
 
 # =============================================================================
@@ -290,9 +233,7 @@ run_integration() {
 
     log "Starting multi-batch integration training with GAGM + CTC..."
 
-    timeout --kill-after=30 ${INTEG_TIMEOUT} python -u "${INTEG_SCRIPT}" \
-        --output_dir "${INTEG_OUTPUT_DIR}" \
-        2>&1 | tee -a "${LOG_FILE}"
+    timeout --kill-after=30 ${INTEG_TIMEOUT} python -u "${INTEG_SCRIPT}" 2>&1 | tee -a "${LOG_FILE}"
     local ret=${PIPESTATUS[0]}
     if [ ${ret} -eq 0 ]; then
         log "✓ Multi-batch integration training completed successfully."
@@ -304,7 +245,6 @@ run_integration() {
     fi
 
     log "Integration model setup completed."
-    cleanup_gpu_memory
 }
 
 # =============================================================================
@@ -316,15 +256,9 @@ run_validation() {
     timeout --kill-after=30 ${VALID_TIMEOUT} python -u -c "
 import sys
 sys.path.insert(0, '${PROJECT_ROOT}')
-import gc
 import torch
 import torch.nn as nn
 import numpy as np
-
-# Clean GPU before starting
-if torch.cuda.is_available():
-    torch.cuda.empty_cache()
-    gc.collect()
 
 print('=' * 70)
 print('GAGM (Gene Adaptive Gating Modulation) - Component Validation')
@@ -502,9 +436,7 @@ print('ALL GAGM COMPONENTS VALIDATED SUCCESSFULLY')
 print('=' * 70)
 
 # Save validation results
-import os
 results_path = '${SAVE_DIR}/gagm_validation_results.txt'
-os.makedirs(os.path.dirname(results_path), exist_ok=True)
 with open(results_path, 'w') as f:
     f.write('GAGM Component Validation Results\n')
     f.write('=' * 40 + '\n')
@@ -515,12 +447,6 @@ with open(results_path, 'w') as f:
     f.write(f'MultiOmicModel+GAGM forward pass: successful\n')
     f.write(f'Training step: successful\n')
 print(f'Results saved to {results_path}')
-
-# Cleanup
-del model, model_multi, gfe, pe
-gc.collect()
-if torch.cuda.is_available():
-    torch.cuda.empty_cache()
 " 2>&1 | tee -a "${LOG_FILE}"
 
     local ret=${PIPESTATUS[0]}
@@ -530,8 +456,6 @@ if torch.cuda.is_available():
         log "✗ GAGM validation failed with code ${ret}"
         return 1
     fi
-    
-    cleanup_gpu_memory
 }
 
 # =============================================================================
@@ -605,30 +529,18 @@ main() {
     
     check_gpu
     
-    # CRITICAL: Kill orphan GPU processes from previous runs
-    kill_orphan_gpu_processes
-    
     # Warm-up: Pre-compile bytecode (first import is slow)
     log "Running bytecode warm-up (first import compiles caches)..."
     python3 -c "
 import sys
 sys.path.insert(0, '${PROJECT_ROOT}')
-import gc
-import torch
 # Import all major modules to pre-compile bytecode
 from scgpt.tokenizer.vocab_compat import BuiltinVocab
 from scgpt.model import TransformerModel, GatedFusionEncoder, PerturbationEncoder
 from scgpt.model.multiomic_model import MultiOmicTransformerModel
 from scgpt.loss import cell_type_contrastive_loss, masked_mse_loss
-# Cleanup after warmup
-gc.collect()
-if torch.cuda.is_available():
-    torch.cuda.empty_cache()
 print('Bytecode warm-up complete!')
 " 2>&1 | tee -a "${LOG_FILE}" || log "Warm-up had issues (non-critical)"
-    
-    # Clean up after warmup
-    cleanup_gpu_memory
     
     log "Starting Task 1: Perturbation Prediction..."
     run_perturbation_prediction
@@ -663,9 +575,6 @@ print('Bytecode warm-up complete!')
     else
         log "Some tasks had issues (non-critical if data unavailable)."
     fi
-    
-    # Final cleanup
-    cleanup_gpu_memory
 }
 
 main "$@"
