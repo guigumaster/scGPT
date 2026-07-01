@@ -1,0 +1,33 @@
+让我继续读取日志的剩余部分，看看执行是否完整完成日志分析完毕。我已完整读取了所有日志内容，可以得出明确结论。
+
+**分析结论：存在异常**
+
+关键证据如下：
+
+1. **Task 1（扰动预测 - Norman 2019）** ✅ 成功完成：
+   - 10个epoch全部训练完毕，验证 loss 从 190.02 降至 57.53
+   - 输出日志：`Training complete. Best model at epoch 10`
+   - 终止日志：`[2026-07-01 06:21:51] [INFO] === Perturbation Prediction Training Complete`
+
+2. **Task 2（多批次整合 - PBMC 10K）** ❌ **出现严重错误**：
+   - 在训练开始时，前向传播过程中触发了 **CUDA Out of Memory（CUDA OOM）** 错误
+   - 具体错误信息：
+     ```
+     torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 76.00 MiB.
+     GPU 0 has a total capacity of 95.08 GiB of which 39.88 MiB is free.
+     Process 2286745 has 77.88 GiB memory in use.
+     ```
+   - 完整 Traceback：
+     ```
+     File "finetune_integration_pctaim.py", line 481, in train
+       output_dict = model(
+     File "pctaim_model.py", line 49, in forward
+       x = self.embedding(x)
+     torch.nn.functional.py", line 2551, in embedding
+       return torch.embedding(weight, input, padding_idx, ...)
+     torch.OutOfMemoryError: CUDA out of memory.
+     ```
+
+3. 由于 Task 2 在执行过程中崩溃（exit code 非0），根据 `run.sh` 脚本 `set -eo pipefail` 的设置，**后续的 Task 2 剩余部分以及 Task 3（Replogle）全部未能执行**。
+
+**结论：存在异常** — 上一轮运行因 CUDA 显存不足（OOM）导致执行中断，未能完整执行完毕。

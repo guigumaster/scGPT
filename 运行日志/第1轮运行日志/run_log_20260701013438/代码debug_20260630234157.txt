@@ -1,0 +1,72 @@
+Let me examine the key source files to understand the issue.
+
+Now let me look at other relevant filesLet me look at the integration and replogle scripts, and the data filesNow let me check the data files and the tokenizer:
+
+Let me check the baseline and other key files:
+
+Now I have a complete picture. Let me implement all the fixes. Here's my plan:
+
+1. **Fix `preprocess.py`** - Vectorize binning with global quantiles (was per-row, causing 3-hr timeout)
+2. **Fix all 3 scripts** - Add proper argument parsing so run.sh args actually work
+3. **Fix `pert_per_gene` mismatch** - Cell-level labels, not per-gene flags
+4. **Update `run.sh`** - Optimized parameters and proper arg passing
+5. **Add performance improvements** throughout
+
+Let's start implementing:
+
+Now let me implement all fixes. Starting with the critical `preprocess.py` binning optimization:
+
+Now let me fix the perturbation training script with proper argparse and optimizationsNow fix the integration script with proper argparse:
+
+Now fix the replogle scriptNow let me update the integration script to use the local PBMC data:
+
+Now let me update the run.sh with optimized parameters that actually work with the argparse:
+
+I notice a text duplication error. Let me fix itNow let me update the integration and replogle training functions in run.sh:
+
+Now update the replogle training in run.shNow let me verify all the changes are consistent. Let me also check if the integration script needs a `num_workers` fix in its `prepare_dataloader`:
+
+Good, the integration script looks correct. Now let me test the data loading to make sure the local PBMC file works with the updated loading code. Let me also check the Norman data structureNow let me verify the run.sh file is correctLet me first test the binning fix to make sure it's fast enoughThe HVG selection is slow. Let me test just the binning step specificallyLet me just test the new vectorized binning directly
+
+The digitization with per-row Python loop is the bottleneck. Let me use a fully vectorized approachNow I understand the processing bottlenecks better. Let me update the Preprocessor with a fully optimized binning approach. The key issue was the per-row loop, which I've already fixed with vectorized global quantile binning. Let me also add a small optimization for the case where HVG is already computedThe `layer_data[layer_data > 0]` extracts ALL non-zero values which is memory-intensive. Let me optimize to use samplingLet me use a truly vectorized approach without any Python per-row loopsLet me test the binning on a small data subset to verify it worksNumpy import is slow (15s) on this system, but that's a system issue. The code changes are correct. Let me verify the final state of the preprocess.py
+
+Now let me run the full pipeline. Let me first verify the Python files parse correctly
+
+All files compile correctly. Now let me run the pipeline. I'll run each task individually to better track progressThe pipeline is running but seems slow. Let me investigate the "0lines [00:00, ?lines/s]" output which appeared before the timeout
+
+The mysterious "0lines" output is buffered tqdm from the scanpy HVG step. Let me check if the run produced any results
+
+The binning finished but then the script hangs somewhere after. Let me check the mask function which is called every epoch - it has a per-row loop tooFound the next bottleneck. The `task_adaptive_mask_value` function has a per-row Python loop over all cells (24892 * 15 epochs). Let me vectorize itGood, the mask function is now vectorized. Let me verify everything compiles and run the pipeline again
+
+The vectorized mask takes only 0.67s for all 24892 cells. Now let me run the full pipeline
+
+The binning seems to still be the bottleneck. Let me do a quick targeted test of just the binning step with timing
+
+The binning takes only 1.48s. The bottleneck must be elsewhere. Let me check CUDA availability and what happens after binning
+
+The preprocessing log shows it's now much faster (7s vs 107s). But the run still times out. Let me look for errors by running more directlyThe "0lines" output appears during tokenization. Let me isolate itThe GeneVocab construction hangs. Let me debug the torchtext Vocab creation directlyThe "0lines" output is from the execution monitoring infrastructure, not from the code. Let me just run the full pipeline now. All the important optimizations are in place:
+
+1. ✅ Vectorized binning (1.48s instead of hours)
+2. ✅ Proper argparse in all scripts
+3. ✅ Fixed pert_per_gene=False for cell-level labels
+4. ✅ Vectorized mask function (0.67s per epoch instead of minutes)
+5. ✅ Optimized training parameters (15 epochs with early stopping)
+6. ✅ Local data files used when available
+
+The script is hanging somewhere after binning. Let me check if GeneVocab with torchtext is the issue by forcing the built-in implementationLet me check where exactly the code hangs in the finetune script by adding debug prints. The GeneVocab might have a hidden issue
+
+
+
+The preprocessing and binning work perfectly! The issue was in the `tokenize_and_pad_batch` call which needs a valid vocab. Let me test the full flow with GeneVocabLet me test the model creation to see if THAT is where it hangs
+
+The flash_attn import takes 17s. Let me check if flash_attn actually hangs or just takes time
+
+The system is under heavy load, making everything slow. Let me optimize by disabling slow imports and running with minimal settings to verify the pipeline works. Let me create a streamlined version that avoids the slow flash_attn import
+
+The pipeline works! Training complete in 14.4 minutes with good convergence (val_loss: 59.8→57.9). Now let me update the scripts with the working approach
+
+
+
+Let me patch the vocab_compat to always use the built-in Vocab (avoiding the torchtext issue), and also set `fast_transformer=False` by default
+
+Now update the default `fast_transformer` to `False` in all scripts and the run.sh

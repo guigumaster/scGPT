@@ -1,0 +1,7 @@
+I'll start by examining the project structure, the log file, and the key source files to understand what needs to be fixedLet me examine the project structure and key source files:
+
+Let me read the core source files to understand the architectureLet me check the available Python and system packagesNow I have a complete understanding of all the issues. Let me implement the fixesLet me read the exact content with offset/limit to see precise whitespaceNow fix the three finetune scripts and the run.sh
+
+Now fix the integration finetune script
+
+Now fix the run.sh to use system Python and correct pathsNow let me verify the fixes work

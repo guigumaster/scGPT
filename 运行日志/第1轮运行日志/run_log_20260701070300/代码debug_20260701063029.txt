@@ -1,0 +1,30 @@
+Let me start by exploring the project structure and understanding the codebase before making any changes.
+
+Let me read the key files first - the run.sh, the error log, and the relevant source filesNow let me read all the relevant source files:
+
+Let me read the error log and other key files:
+
+Let me check the pretrained model configuration and vocab sizeNow I have a thorough understanding of the issues. Let me implement the fixes:
+
+**Root Cause Analysis:**
+1. The integration task loads the pretrained `scGPT_human` model (12 layers, 512 dim, 60697 vocab) - very large
+2. With batch_size=32, the model activations consume too much GPU memory
+3. The command-line model architecture args are ignored when loading from pretrained
+
+**Fixes:**
+1. Reduce batch_size for integration, allow model size override from CLI
+2. Add memory cleanup between tasks
+3. Add gradient checkpointing to the model for memory efficiency
+
+Let me start implementing:
+
+Now let me also add cleanup between all tasks in the "all" mode:
+
+Now let me modify the key Python files. First, the integration script to allow model architecture override when loading from pretrained:
+
+Now let me modify the integration script to allow command-line model architecture args to override the pretrained model configNow let me add gradient checkpointing support to the PCTAIM model for memory efficiencyNow let me add `use_grad_checkpointing` to the integration script's model and add memory cleanup
+
+Now let me add memory cleanup and monitoring at the end of the integration script
+
+
+

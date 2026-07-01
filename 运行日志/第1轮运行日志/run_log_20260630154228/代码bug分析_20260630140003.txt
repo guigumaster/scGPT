@@ -1,0 +1,28 @@
+## 分析结果
+
+**结论: "存在异常"**
+
+### 详细分析
+
+从 `execute_log.log` 中可以观察到以下异常：
+
+1. **程序因异常崩溃，未能完整执行完毕**
+
+   日志显示，在运行第一个任务 **Perturbation Prediction (Norman 2019)** 时，Python 脚本 `finetune_perturbation_pctaim.py` 在执行 `wandb.init()` 时抛出异常：
+
+   ```
+   wandb: ERROR api_key not configured (no-tty). call wandb.login(key=[your_api_key])
+   ```
+
+   随后出现完整的 Traceback，最终报错：
+   ```
+   wandb.errors.errors.UsageError: api_key not configured (no-tty). call wandb.login(key=[your_api_key])
+   ```
+
+2. **根本原因**: Weights & Biases (wandb) 的 API key 未配置，且当前环境为非交互式终端（no-tty），无法交互式输入 API key，导致 wandb 初始化失败。
+
+3. **运行未完成**: 从日志可见，执行流程在第一个任务阶段就中断了，后续的 **Multi-batch Integration (PBMC 10K)**、**Large-scale Perturbation Prediction (Replogle 2022)** 等任务完全没有开始执行。脚本中设置了 `set -euo pipefail`，因此 Python 脚本返回非零退出码后 shell 脚本立即终止。
+
+### 总结
+
+上一轮运行存在严重异常，**未完整执行完毕**，属于明确的执行异常情况。

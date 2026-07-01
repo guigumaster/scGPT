@@ -1,0 +1,28 @@
+## 分析结论
+
+**结论: 存在异常**
+
+**详细分析：**
+
+从日志中可以看出，程序在执行到 **"Evaluating Perturbation Prediction"** 阶段时发生了严重错误，未能完整执行完毕。
+
+运行流程回顾：
+
+1. ✅ **环境检查** — 正常通过
+2. ✅ **Perturbation Prediction 训练 (Norman 2019)** — 正常完成（epoch 1-5）
+3. ✅ **Cell Embedding Evaluation** — 正常完成（NMI, ARI, Silhouette, PCR, Graph connectivity）
+4. ✅ **Large-scale Perturbation Training (Replogle)** — 正常完成（epoch 1-15）
+5. ❌ **Evaluating Perturbation Prediction** — **执行失败**
+
+**错误信息（位于日志末尾）：**
+```
+FileNotFoundError: [Errno 2] No such file or directory: 
+'/inspire/.../scGPT/save/dev_norman_pctaim-Jul01-02-34/vocab.json'
+```
+
+**根本原因：**
+- 在加载 Norman 数据集的 checkpoint（`dev_norman_pctaim-Jul01-02-34/best_model.pt`）进行模型评估时，程序需要读取同目录下的 `vocab.json` 文件
+- 该文件 `vocab.json` 不存在，导致 `FileNotFoundError` 异常抛出
+- 程序在此处崩溃，未能继续执行后续的评估流程
+
+**总结：** 上一轮运行存在执行异常（文件缺失导致崩溃），未能完整执行完毕。

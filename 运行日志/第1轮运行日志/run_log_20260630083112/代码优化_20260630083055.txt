@@ -1,0 +1,71 @@
+Let me read the core source files to understand the architectureNow let me read the remaining key files:
+
+Let me also check the generation model:
+
+Now I have a thorough understanding of the complete codebase. Let me implement the **PCT-AIM** architecture across the project.
+
+I'll start by creating the new PCT-AIM model file:
+
+Now let me update `model/__init__.py` to export the new PCT-AIM model and the task-adaptive masking functionNow let me create the three task-specific finetuning scripts and update the trainer. First, the perturbation prediction script with PCT-AIMNow create the integration finetuning script with PCT-AIMNow create the large-scale perturbation script with PCT-AIM
+
+Now let me update the trainer to support `pert_labels` in the data preparation flow (for compatibility):
+
+
+
+Now let me create the `run.sh` script with training, validation, and testing commands:
+
+Let me verify all the created/modified files所有工作已完成。以下是已实现的 **PCT-AIM（扰动条件感知跨模态 Transformer 与自适应重要性掩码）** 架构的摘要：
+
+---
+
+## 已实施的改进方案
+
+### 新创建的文件（5个）
+
+| 文件 | 功能描述 |
+|---|---|
+| `scgpt/model/pctaim_model.py` | **PCT-AIM 主模型** — 包含三种紧密耦合机制 |
+| `data/finetune_perturbation_pctaim.py` | 扰动预测微调脚本（Norman 2019），集成 PCT-AIM |
+| `data/finetune_integration_pctaim.py` | 多批次整合微调脚本（PBMC 10K），集成 PCT-AIM |
+| `data/finetune_replogle_pctaim.py` | 大规模扰动预测微调脚本（Replogle 2022），集成 PCT-AIM |
+| `run_log/run.sh` | 完整的训练/验证/测试流水线 Shell 脚本 |
+
+### 修改的文件（2个）
+
+| 文件 | 修改内容 |
+|---|---|
+| `scgpt/model/__init__.py` | 添加了 `PCTAIMTransformerModel`、`task_adaptive_mask_value` 等导出项 |
+| `scgpt/trainer.py` | 集成了任务自适应掩码并支持前向传播中的 `pert_labels` |
+
+### 三种 PCT-AIM 机制
+
+#### 1. **扰动条件编码器**（`PerturbationConditionEncoder`）
+- 将扰动标签（如 guide identity 或条件类型）编码为连续嵌入
+- 支持逐基因标志（每个 token 0/1/2）和整体细胞级标签
+- 通过可学习缩放系数将扰动嵌入与基因 token 表示相加融合
+
+#### 2. **跨模态交叉注意力层**（`CrossModalFusionLayer`）
+- 在 RNA 和蛋白质模态之间建立双向交叉注意力
+- 使用门控融合机制（sigmoid 门控）自适应地结合原始表示与交叉注意力更新后的表示
+- 完整支持多组学数据（CITE-seq 等）
+
+#### 3. **任务自适应重要性掩码**（`task_adaptive_mask_value`）
+- **扰动任务**：对已知的扰动靶基因施加更高的掩码概率（+0.3 提升量，上限 0.9）
+- **整合任务**：根据 HVG 状态计算基因重要性分数，在高变异基因上增加掩码率
+- **大规模扰动**：在条件特异性基因上使用自适应加权采样，整体掩码率较低（0.35）
+
+### 运行脚本（`run_log/run.sh`）
+
+```bash
+# 用法
+bash run_log/run.sh                      # 运行完整流水线（所有任务）
+bash run_log/run.sh perturbation train   # 仅训练扰动预测模型
+bash run_log/run.sh integration eval     # 仅评估整合模型
+bash run_log/run.sh replogle test        # 仅测试大规模扰动模型
+```
+
+该脚本会：
+1. 设置 PYTHONPATH 和 CUDA 环境
+2. 检查依赖项（torch、wandb、scib）
+3. 依次运行三个任务的训练、评估和测试
+4. 为每个任务保存最佳模型检查点

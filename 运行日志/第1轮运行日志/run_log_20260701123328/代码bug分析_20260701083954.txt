@@ -1,0 +1,35 @@
+Let me read the rest of the log file to see if the execution completed.
+
+## 分析结果
+
+通过阅读完整的执行日志 `execute_log.log`，我得出以下分析结论：
+
+### 发现的关键问题
+
+1. **进程被OOM Kill（内存溢出）**：日志末尾明确显示：
+   ```
+   run.sh: line 62: 2525018 Killed                  ${PYTHON} "${script_path}" ${extra_args}
+   [2026-07-01 08:39:26] [ERROR] Command failed with exit code 137: ...
+   ```
+   以及第二次重试也遭遇同样问题：
+   ```
+   run.sh: line 62: 2521324 Killed                  ${PYTHON} "${script_path}" ${extra_args}
+   [2026-07-01 08:39:26] [ERROR] Command failed with exit code 137: ...
+   ```
+   退出码 **137** 表示进程被 `SIGKILL` 信号终止，通常原因是 **OOM（Out of Memory，内存不足）**。
+
+2. **Pipeline 未完整执行**：
+   - 脚本配置了三个任务（Perturbation → Integration → Replogle），每个任务包含 train + eval + test
+   - 日志仅执行了 **Task 1（Perturbation Prediction - Norman 2019）** 的 **训练阶段**，且在 epoch 10（最后一个epoch）中间被 kill
+   - **Task 2（Integration）**、**Task 3（Replogle）** 以及所有任务的 **评估（eval）和测试（test）** 阶段均**从未执行**
+
+3. **Warning / 非致命问题也存在**（但不影响异常判断）：
+   - 多项 `FutureWarning`（leiden聚类、pandas.value_counts弃用等）
+   - `UserWarning`（数据似乎已经 log 变换过）
+   - `DeprecationWarning`（fork 多线程死锁风险）
+
+### 结论
+
+**存在异常**
+
+上一轮运行因 **内存不足（OOM）导致进程被系统强制终止**（exit code 137），Pipeline 仅完成了第一个任务（Perturbation Prediction）的部分训练，后续两个任务（Integration、Replogle）以及所有任务的评估和测试均未执行，未完整执行完毕。

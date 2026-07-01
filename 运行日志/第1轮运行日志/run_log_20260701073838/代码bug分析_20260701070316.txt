@@ -1,0 +1,21 @@
+Let me read the rest of the log file to see the full execution从日志分析来看，任务执行过程中出现了**明确的运行时错误**，未能完整执行完毕。
+
+**错误详情：**
+
+在运行 **Multi-batch Integration (PBMC 10K)** 任务（`finetune_integration_pctaim.py`）时，发生了以下错误：
+
+```
+RuntimeError: The shape of the 2D attn_mask is torch.Size([8, 1201]), but should be (1201, 1201).
+```
+
+这个错误发生在训练的 forward 传播阶段，注意力掩码（attention mask）的形状不匹配——预期是 `(1201, 1201)` 的方阵，但实际传入的是 `[8, 1201]`。此外，之前还出现了部分模型加载时的 shape 不匹配警告：
+
+```
+scGPT - WARNING - Partial model load: Error(s) in loading state_dict for PCTAIMTransformerModel:
+	size mismatch for decoder.fc.0.weight: ...
+	size mismatch for mvc_decoder.gene2query.weight: ...
+```
+
+由于 `run.sh` 中设置了 `set -eo pipefail`，脚本在出错后立即退出，导致后续的 **Replogle 训练** 以及所有 **Evaluation** 和 **Testing** 任务均未执行。
+
+**结论：存在异常**

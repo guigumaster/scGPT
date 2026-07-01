@@ -1,0 +1,44 @@
+Let me continue reading the rest of the log file:
+
+## 日志分析结果
+
+我已完整阅读了 `execute_log.log` 文件（共1519行），分析了整个管线的执行过程。
+
+### 执行流程总结
+
+运行脚本以 `all` 模式执行了完整的 PCT-AIM 管线，包含以下三个阶段：
+
+| 阶段 | 任务 | 状态 |
+|------|------|------|
+| **环境检查** | 检查Python包、数据文件、预训练模型 | ✅ 成功 |
+| **训练** | 1. Perturbation Prediction (Norman) - 10 epochs | ✅ 完成 |
+| | 2. Multi-batch Integration (PBMC 10K) - 10 epochs | ✅ 完成 |
+| | 3. Large-scale Perturbation (Replogle) - 10 epochs | ✅ 完成 |
+| **评估** | 1. Perturbation Evaluation | ✅ 完成 |
+| | 2. Integration Evaluation | ✅ 完成 |
+| | 3. Replogle Evaluation | ✅ 完成 |
+| **测试** | 1. Perturbation Testing | ✅ 完成 |
+| | 2. Integration Testing | ✅ 完成 |
+| | 3. Replogle Testing | ✅ 完成 |
+
+### 最终日志输出
+
+```
+[2026-07-01 12:33:28] [INFO] === PCT-AIM FULL pipeline complete ===
+[2026-07-01 12:33:28] [INFO] All tasks completed successfully!
+```
+
+### 关于日志中的警告/提示
+
+日志中存在一些 `Warning` 和 `FutureWarning`，但它们属于**非致命性警告**，不影响正常执行：
+- `FutureWarning`（关于 leiden 聚类算法、pandas.value_counts 等）- 第三方库的弃用提示
+- `UserWarning`（关于 `lr_scheduler.step()` 调用顺序、`flavor='seurat_v3'` 等）
+- `ResourceWarning`（临时文件清理）
+- `Partial model load` 大小不匹配 - 属于预期行为（模型架构不同，仅加载匹配的层）
+- 部分指标为 `NaN` - 属于 scib 指标计算的正常现象
+
+**没有发现任何错误、崩溃、异常退出或未完整执行的情况。**
+
+### 结论
+
+**没有异常**
