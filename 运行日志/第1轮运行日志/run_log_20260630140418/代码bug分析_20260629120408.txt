@@ -1,0 +1,36 @@
+## 分析结果
+
+通过阅读 `execute_log.log`，发现上一轮运行**存在异常**。
+
+### 错误详情
+
+执行在 **Step 3 (Norman Perturb-seq Continual Pretraining)** 阶段失败。当运行 `norman_continual_pretrain.py` 时，代码调用 `wandb.init()` 初始化 Weights & Biases 日志记录，但由于未配置 API Key，抛出了以下错误：
+
+```
+wandb.errors.errors.UsageError: No API key configured. Use `wandb login` to log in.
+```
+
+### 完整调用栈
+
+```
+  File "norman_continual_pretrain.py", line 640, in main
+    run = wandb.init(...)
+  File "wandb_init.py", line 1445, in init
+    wi.maybe_login(init_settings)
+  File "wandb_login.py", line 190, in _login
+    auth = _find_or_prompt_for_key(...)
+  File "wandb_login.py", line 266, in _find_or_prompt_for_key
+  File "authenticate.py", line 120, in authenticate_session
+    raise UsageError("No API key configured. Use `wandb login` to log in.")
+```
+
+### 执行状态
+
+- ✅ Step 1 (Data & Model Directories Preparation) — 完成
+- ✅ Step 2 (Verify scgpt Import) — 完成
+- ❌ Step 3 (Norman Perturb-seq Continual Pretraining) — **失败**
+- ⏭️ Step 4 (Enhanced Fine-tuning) — 未执行
+- ⏭️ Step 5 (Baseline Fine-tuning) — 未执行
+- ⏭️ Step 6 (Summary) — 未执行
+
+**结论: 存在异常**

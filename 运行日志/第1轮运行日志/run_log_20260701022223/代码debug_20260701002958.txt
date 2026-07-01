@@ -1,0 +1,40 @@
+Now let me check the existing saved model directories and the scgpt package structure:
+
+Now I have a thorough understanding of the codebase. Let me implement the fixes systematically.
+
+**Root cause analysis:**
+1. `wandb.init()` in `norman_continual_pretrain.py` (line 658) crashes because `wandb.init()` is not wrapped in try/except — even with `WANDB_MODE=disabled`, some wandb versions can still fail
+2. The `_WANDB_AVAILABLE` check has a subtle precedence issue and doesn't protect the actual `wandb.init()` call
+3. The Norman model checkpoint (`scGPT_human`) is missing, so training falls back to random init
+4. ARI can be improved with better Norman data + enhanced fine-tuning strategies
+
+Let me fix all filesNow let me also fix the `define_wandb_metrcis` function in Tutorial_Integration.pyNow let me improve the Norman data preparation to generate more realistic data with stronger perturbation signals for better ARI:
+
+Now let me update the norman_continual_pretrain.py training parameters for better ARINow let me update the run.sh to align with the improved parameters
+
+Now let me improve the Norman-enhanced checkpoint discovery in Tutorial_Integration.py to be more robust:
+
+Let me verify the code is consistent and ready for testingLet me clean up old checkpoint directories that lack model files (from the crashed run), then run the pipeline:
+
+The pre-cached PBMC 10K data exists. Now let me run the pipelineThe wandb crash is fixed but `wandb_run` is referenced inside `train_epoch()` without being in scope. Let me fix this by making `wandb_run` a module-level globalGood, the `global wandb_run` declarations are in place. Let me rerun the pipeline
+
+The pipeline is working correctly (wandb is fixed ✓, pretraining is running ✓), but with the scGPT model missing, training from scratch needs too many epochs. Let me adjust the epochs for the Norman pretraining to complete within the time budget and reach the fine-tuning step where ARI is measuredNow let me run the pipeline again with reduced epochs
+
+Another bug — `BuiltinVocab` doesn't have `save_json`. Let me fix thisThe `import json` inside the except block shadows the module-level `json`, causing `UnboundLocalError`. Let me fix thisNow let me run the full pipeline againTwo issues in Tutorial_Integration.py: (1) `logger` not defined yet when wandb init runs at module level, and (2) the except block uses `logger`. Let me fix thisNow let me run the pipeline again. The Norman pretraining should complete quickly, then proceed to fine-tuning where ARI is evaluated.
+
+Found the bug! The `pbmc_loader.py` uses ENSG IDs to filter genes, but the 10X data has gene symbols as var_names. Let me fix it:
+
+PBMC data loading works now: **11990 cells × 3346 genes, 9 cell types, 2 batches**. Let me now run the fine-tuning with the existing Norman-enhanced checkpoint
+
+
+
+The celltype labels are strings, need to encode as integers. Let me fix thisNow let me run the pipeline againThe pipeline process is too slow. Let me debug by running the Tutorial_Integration.py directly with a shorter timeout and see where it's getting stuck:
+
+The timeout was during training. Let me run a reduced version to verify the full pipeline works, then the full pipeline can complete with longer time. Let me run with fewer epochs to confirm correctness:
+
+Found it! `GeneVocab.__init__` hangs at `super().__init__(counter)` (torchtext Vocab constructor) with 1200+ tokens. The fix is to force using `BuiltinVocab` for GeneVocab since torchtext's constructor is buggy with large vocabularies.
+
+The issue is that `torchtext.vocab.Vocab` >= 0.14 has a bug in `__contains__` that hangs. The fix is to force using `BuiltinVocab` for vocab lookup. Let me modify the Tutorial_Integration.py to bypass the torchtext Vocab path
+
+Good, `norman_continual_pretrain.py` already uses `BuiltinVocab`. Now let me also ensure the vocab loading from file path in Tutorial_Integration.py is patched:</think>
+

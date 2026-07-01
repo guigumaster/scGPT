@@ -1,0 +1,13 @@
+分析日志后发现，上一轮运行存在异常。
+
+**证据：**
+
+日志中 Step 4（Norman Perturb-seq Continual Pretraining）阶段执行 `noman_continual_pretrain.py` 时，在调用 `wandb.init()` 初始化 Weights & Biases 时抛出异常：
+
+```
+wandb.errors.errors.UsageError: api_key not configured (no-tty). call wandb.login(key=[your_api_key])
+```
+
+该错误导致程序在 Step 4 崩溃退出，未能完成整个管线的训练流程。
+
+**结论: 存在异常**

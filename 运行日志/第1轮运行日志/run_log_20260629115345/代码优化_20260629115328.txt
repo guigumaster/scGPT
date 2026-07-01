@@ -1,0 +1,78 @@
+Let me read the key files to understand the codebase.
+
+Now let me read the model and other critical files:
+
+Let me read the remaining key files:
+
+Now I have a comprehensive understanding of the codebase. Let me implement the improvement plan.
+
+Let me create the directory structure for the scripts:
+
+Now I have a thorough understanding of the full codebase. Let me implement the Norman continual pretraining and enhanced integration pipeline.
+
+First, let me check if there's an existing scripts directory:
+
+Now let me create all the files. First, the Norman continual pretraining scriptNow let me modify the `Tutorial_Integration.py` to support loading Norman-enhanced checkpoints and add improvements for ARINow let me write the enhanced `Tutorial_Integration.py` with Norman checkpoint support and ARI-boosting improvementsLet me fix a potential variable scope issue in the integration script:
+
+Let me fix the variable scope issues in the integration script:
+
+Now let me fix the model loading section where `model_file` is referencedNow let me create the `run.sh` pipeline fileLet me verify the file integrity and make the run script executable:
+
+Let me do a final verification of all modified filesLet me do a syntax check on the Python files:
+
+All files compile successfully. Let me verify the files are complete and provide a summary
+
+
+
+已完成所有修改。以下是完整的改进方案总结：
+
+---
+
+## 📋 改进方案：Norman扰动数据持续预训练增强细胞表征
+
+### 核心思路
+
+利用 **Norman Perturb-seq** 数据集中 **105种CRISPR基因扰动** 产生的多样化转录组状态，对 scGPT 进行持续预训练，以学习更精细的基因共表达模式和更具区分性的细胞嵌入表示，从而显著提升 BMMC 多组学整合任务上的 **ARI 等核心指标**。
+
+### 为什么 Norman 数据能提升 ARI？
+
+| 因素 | 说明 |
+|------|------|
+| **扰动多样性** | 105种CRISPR扰动创建了远超正常细胞的多样化转录组状态，迫使模型学习更鲁棒的基因调控关系 |
+| **MLM任务增强** | 在扰动数据上做掩码预测，模型被迫理解非正常状态下的基因共表达模式 |
+| **GEPC/MVC任务** | 在扰动数据上学习细胞嵌入，使得嵌入空间能区分更细微的细胞状态差异 |
+| **迁移学习价值** | 在扰动数据上预训练获得的基因共表达知识可以迁移到整合任务中，提高细胞类型分辨能力 |
+
+### 修改的文件
+
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `tutorials/scripts/norman_continual_pretrain.py` | **新建** | Norman持续预训练脚本，仅启用MLM+GEPC/MVC目标，支持多种数据源加载 |
+| `tutorials/Tutorial_Integration.py` | **修改** | 增强版整合微调脚本：支持 Norman 增强检查点、CCE对比学习、余弦退火调度、30轮训练、梯度裁剪 |
+| `run_log/run.sh` | **新建** | 完整流水线脚本：数据准备 → Norman预训练 → 增强微调 → 基线对比 |
+
+### 关键改进点（针对ARI提升）
+
+1. **Norman持续预训练**：在105种扰动数据上学习，仅用 MLM + GEPC/MVC，让模型学习更泛化的基因共表达模式
+2. **CCE对比学习损失**：在微调阶段启用对比损失，使同类细胞嵌入更紧凑、异类更分散 → 直接提升ARI
+3. **训练轮数翻倍**：15轮 → 30轮，更充分的收敛
+4. **余弦退火学习率**：`CosineAnnealingLR` + 最小学习率 1e-6，更好的优化轨迹
+5. **权重衰减**：AdamW + 1e-5 weight decay，防止过拟合
+6. **梯度裁剪**：防止梯度爆炸，训练更稳定
+7. **详细指标追踪**：单独记录 ARI/NMI/ASW，便于比较
+
+### 运行方式
+
+```bash
+# 完整流水线
+bash run_log/run.sh
+
+# 仅做 Norman 持续预训练
+bash run_log/run.sh --norman-only
+
+# 指定 Norman 数据路径
+bash run_log/run.sh --data-path /path/to/norman.h5ad
+
+# 仅做增强微调（跳过Norman预训练，使用已有检查点）
+bash run_log/run.sh --skip-norman
+```
