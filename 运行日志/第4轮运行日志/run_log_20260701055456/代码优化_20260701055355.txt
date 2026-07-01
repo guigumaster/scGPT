@@ -1,0 +1,20 @@
+Let me start by thoroughly exploring the project structure and understanding the codebaseLet me continue reading the remaining parts of the Tutorial_Integration.py and the scgpt data module:
+
+Let me check the vocabulary format and model save directory:
+
+Now I have a thorough understanding of the codebase. Let me implement the changes systematically.
+
+**Root cause identified**: The PBMC 10K data loader uses ENSEMBL gene IDs (`var_names="gene_ids"`) as the gene index, but the scGPT_human vocabulary uses **gene symbols** (e.g., "MALAT1", "TP53"). This causes only 265/3346 (~7.9%) match rate, severely limiting model performance.
+
+Let me make all the necessary changes:
+
+Now I'll implement all the changes. Let me start with the most critical fix - the PBMC loader gene symbol issue:
+
+Now let me update the main training script with optimized hyperparameters:
+
+Now let me make the comprehensive changes to Tutorial_Integration.py:
+
+Now let me update the mask ratio schedule and a few other critical sections:
+
+Now let me add learning rate warmup to the Stage 2 optimizer:
+

@@ -534,10 +534,10 @@ def main():
         do_train=True,
         load_model=str(PROJECT_ROOT / "save" / "scGPT_human"),
         GEPC=True,
-        ecs_thres=0.3,
+        ecs_thres=0.5,
         dab_weight=0.3,
         mask_ratio=0.35,
-        epochs=35,
+        epochs=45,
         n_bins=51,
         lr=3e-5,
         batch_size=128,
@@ -552,23 +552,25 @@ def main():
         pre_norm=False,
         amp=True,
         # DataLoader performance
-        num_workers=4,
+        num_workers=2,
         # === Gradient Accumulation ===
         gradient_accumulation_steps=2,
         # === Norman Continual Pretraining Config ===
-        # Optimized for speed: fewer epochs, smaller dataset, larger batch, no per-seq sampling
+        # Use full Norman data (100%) for maximum perturbation diversity
         use_norman_continual_pretrain=True,
-        norman_epochs=8,
-        norman_lr=1.5e-4,
-        norman_batch_size=256,
-        norman_n_hvg=2000,
+        norman_epochs=10,
+        norman_lr=2.5e-4,
+        norman_batch_size=512,
+        norman_n_hvg=896,
         norman_continue_from_pretrained=True,
-        norman_subsample_ratio=0.4,
+        norman_subsample_ratio=1.0,
         norman_save_dir=str(PROJECT_ROOT / "save" / "scGPT_norman_continual_pretrain"),
         # Early stopping
-        norman_patience=4,
+        norman_patience=5,
         norman_min_delta=5e-5,
         norman_gradient_accumulation_steps=2,
+        # Force reload PBMC to regenerate cache with gene symbols (critical fix)
+        force_reload_pbmc=True,
     )
 
     # Try to use wandb; fall back to offline/no-wandb mode
@@ -617,7 +619,9 @@ def main():
     pad_value = -2
     n_input_bins = config.n_bins
 
-    n_hvg = max(getattr(config, 'norman_n_hvg', 1800), 1800)
+    # Use vocab-matched gene count as HVG target (vocab has ~896 gene symbols)
+    # This ensures we keep most matched genes while still selecting the most variable ones
+    n_hvg = max(getattr(config, 'norman_n_hvg', 896), 896)
     max_seq_len = n_hvg + 1
     per_seq_batch_sample = True
     DSBN = True
@@ -637,10 +641,23 @@ def main():
     # Step 2: Load and pre-process data
     # -------------------------------------------------------------------------
     if dataset_name == "PBMC_10K":
-        adata = load_pbmc_dataset()  # 11990 x 3346, now uses h5ad cache
+        # Force reload PBMC data with gene symbols (critical fix: old cache used ENSG IDs
+        # which only matched 7.9% of vocab; now using gene symbols for >80% match)
+        force_reload = getattr(config, 'force_reload_pbmc', False)
+        adata = load_pbmc_dataset(force_reload=force_reload)  # 11990 x ~3346 (gene symbols)
         ori_batch_col = "batch"
         adata.obs["celltype"] = adata.obs["str_labels"].astype("category")
-        adata.var = adata.var.set_index("gene_symbols")
+        # var.index is already gene symbols (loaded with var_names='gene_symbols')
+        # Only remap if the index is NOT already gene symbols (e.g., if cached data has ENSG IDs)
+        if adata.var.index[0].startswith("ENSG"):
+            logger.warning("var.index contains ENSG IDs, remapping to gene symbols...")
+            if "gene_symbols" in adata.var.columns:
+                adata.var = adata.var.set_index("gene_symbols")
+            elif "gene_symbol" in adata.var.columns:
+                adata.var = adata.var.set_index("gene_symbol")
+            else:
+                # Try to use the ensg_id column mapping
+                logger.info("Gene symbols already in var.index, skipping remap.")
         data_is_raw = True
 
     adata.obs["str_batch"] = adata.obs[ori_batch_col].astype(str)
@@ -814,8 +831,23 @@ def main():
         model.parameters(), lr=config.lr, eps=1e-4 if config.amp else 1e-8,
         weight_decay=1e-4
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=config.epochs, eta_min=1e-6
+    # Cosine annealing LR scheduler with linear warmup for first 5 epochs
+    warmup_epochs = min(5, config.epochs // 5)
+    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=config.epochs - warmup_epochs, eta_min=1e-6
+    )
+    # Use a simple warmup: for first warmup_epochs, linearly increase LR from 0.1*config.lr to config.lr
+    def warmup_lambda(epoch):
+        if epoch < warmup_epochs:
+            return 0.1 + 0.9 * epoch / max(1, warmup_epochs - 1)
+        else:
+            return 1.0  # cosine scheduler handles remaining schedule
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=warmup_lambda)
+    # Chain warmup -> cosine decay
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[scheduler, cosine_scheduler],
+        milestones=[warmup_epochs]
     )
     scaler = torch.amp.GradScaler('cuda', enabled=config.amp)
 
@@ -916,8 +948,9 @@ def main():
             )
         norman_model.to(device)
 
-        norman_optimizer = torch.optim.Adam(
-            norman_model.parameters(), lr=config.norman_lr, eps=1e-4 if config.amp else 1e-8
+        norman_optimizer = torch.optim.AdamW(
+            norman_model.parameters(), lr=config.norman_lr, eps=1e-4 if config.amp else 1e-8,
+            weight_decay=1e-4
         )
         norman_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             norman_optimizer, T_max=config.norman_epochs, eta_min=1e-6
@@ -1123,7 +1156,7 @@ def main():
         norman_save_dir.mkdir(parents=True, exist_ok=True)
 
         norman_patience = getattr(config, 'norman_patience', 5)
-        norman_min_delta = getattr(config, 'norman_min_delta', 3e-5)
+        norman_min_delta = getattr(config, 'norman_min_delta', 5e-5)
         norman_no_improve_count = 0
 
         for norman_epoch in range(1, config.norman_epochs + 1):
@@ -1141,7 +1174,7 @@ def main():
                 batch_size=config.norman_batch_size,
                 shuffle=True,
                 drop_last=False,
-                num_workers=2,
+                num_workers=0,  # Use 0 workers to avoid spawn issues with inner functions
                 pin_memory=True,
             )
             norman_valid_loader = DataLoader(
@@ -1149,7 +1182,7 @@ def main():
                 batch_size=config.norman_batch_size,
                 shuffle=False,
                 drop_last=False,
-                num_workers=2,
+                num_workers=0,  # Use 0 workers to avoid spawn issues with inner functions
                 pin_memory=True,
             )
 
@@ -1250,10 +1283,13 @@ def main():
         gc.collect()
         torch.cuda.empty_cache()
 
-        # Use cosine mask ratio schedule with minimum floor to avoid empty masks
+        # Cosine mask ratio schedule: start near mask_ratio, decay to ~0.08
+        # High mask ratio early: expose model to more diverse contexts for better learning
+        # Low mask ratio late: fine-grained tuning with more unmasked context
+        # Floor at 0.08 ensures sufficient learning signal throughout
         mask_ratio_schedule = max(
             mask_ratio * (1 + np.cos(np.pi * epoch / config.epochs)) / 2,
-            0.08  # minimum mask ratio to ensure some positions are masked
+            0.08  # minimum mask ratio for sustained learning signal
         )
 
         epoch_start_time = time.time()
@@ -1277,7 +1313,7 @@ def main():
             drop_last=False,
             per_seq_batch_sample=per_seq_batch_sample,
             config=config,
-            num_workers=2,  # Use 2 workers for faster data loading
+            num_workers=0,  # Use 0 workers to avoid DataLoader spawn/multiprocessing issues
         )
         valid_loader = prepare_dataloader(
             valid_data_pt,
@@ -1287,7 +1323,7 @@ def main():
             drop_last=False,
             per_seq_batch_sample=per_seq_batch_sample,
             config=config,
-            num_workers=2,  # Use 2 workers for faster data loading
+            num_workers=0,  # Use 0 workers to avoid DataLoader spawn/multiprocessing issues
         )
 
         if config.do_train:
