@@ -234,6 +234,30 @@ class AdversarialDiscriminator(nn.Module):
         return self.out_layer(x)
 
 
+class PerturbationPredictor(nn.Module):
+    """
+    Dedicated multi-label perturbation prediction head.
+    Predicts which perturbations are present in a cell based on its embedding.
+    Supports both single-label and multi-label perturbation prediction.
+    """
+    def __init__(self, d_model: int, n_perturbations: int, nlayers: int = 3):
+        super().__init__()
+        layers = []
+        for i in range(nlayers - 1):
+            layers.extend([
+                nn.Linear(d_model, d_model),
+                nn.LayerNorm(d_model),
+                nn.GELU(),
+                nn.Dropout(0.1),
+            ])
+        self.fc = nn.Sequential(*layers)
+        self.classifier = nn.Linear(d_model, n_perturbations)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.fc(x)
+        return self.classifier(x)
+
+
 class FastTransformerEncoderWrapper(nn.Module):
     def __init__(self, d_model: int, nhead: int, d_hid: int, nlayers: int,
                  dropout: float = 0.5):
@@ -350,15 +374,22 @@ class PerturbationConditionEncoder(nn.Module):
                  padding_idx: int = 0, per_gene: bool = True):
         super().__init__()
         self.per_gene = per_gene
+        self.d_model = d_model
         if per_gene:
             # Per-gene perturbation flag encoder (0/1/2: no pert / pert / padding)
             self.pert_embedding = nn.Embedding(3, d_model, padding_idx=padding_idx)
         else:
-            # Global perturbation label encoder
-            self.pert_embedding = nn.Embedding(num_perturbations, d_model,
-                                               padding_idx=0)
+            # Global perturbation label encoder with higher capacity
+            self.pert_embedding = nn.Embedding(num_perturbations, d_model, padding_idx=0)
+            # Additional MLP to project perturbation embedding to richer representation
+            self.pert_proj = nn.Sequential(
+                nn.Linear(d_model, d_model),
+                nn.LayerNorm(d_model),
+                nn.GELU(),
+                nn.Linear(d_model, d_model),
+            )
         # Learnable scale factor to balance perturbation signal vs gene expression
-        self.scale = nn.Parameter(torch.ones(1) * 0.5)
+        self.scale = nn.Parameter(torch.ones(1) * 0.3)
 
     def forward(self, pert_labels: Tensor) -> Tensor:
         """
@@ -370,6 +401,9 @@ class PerturbationConditionEncoder(nn.Module):
             pert_emb: (batch_size, d_model) or (batch_size, seq_len, d_model)
         """
         pert_emb = self.pert_embedding(pert_labels)
+        if not self.per_gene and pert_emb.dim() == 2:
+            # Apply projection MLP for cell-level perturbation embeddings
+            pert_emb = self.pert_proj(pert_emb)
         return pert_emb * self.scale
 
 
@@ -387,14 +421,23 @@ class CrossModalCrossAttention(nn.Module):
 
     This allows each modality to attend to the other, producing jointly
     informed representations.
+
+    Improved version with:
+      - LayerNorm before cross-attention (Pre-LN style)
+      - Properly incorporated residual connection
+      - Learnable gating for adaptive fusion
     """
 
     def __init__(self, d_model: int, nhead: int, dropout: float = 0.1):
         super().__init__()
         self.cross_attn = nn.MultiheadAttention(
             d_model, nhead, dropout=dropout, batch_first=True)
-        self.norm = nn.LayerNorm(d_model)
+        self.norm_q = nn.LayerNorm(d_model)
+        self.norm_kv = nn.LayerNorm(d_model)
+        self.norm_out = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
+        # Learnable gating for adaptive fusion
+        self.gate = nn.Parameter(torch.ones(1) * 0.5)
 
     def forward(self, rna_repr: Tensor, prot_repr: Tensor,
                 key_padding_mask: Optional[Tensor] = None) -> Tensor:
@@ -408,12 +451,18 @@ class CrossModalCrossAttention(nn.Module):
             output: (batch, seq_len_rna, d_model) – RNA representations updated
                     with protein context via residual connection.
         """
+        # Pre-LN: normalize before attention
+        q = self.norm_q(rna_repr)
+        kv = self.norm_kv(prot_repr)
         attn_out, _ = self.cross_attn(
-            rna_repr, prot_repr, prot_repr,
+            q, kv, kv,
             key_padding_mask=key_padding_mask,
         )
-        return rna_repr + self.dropout(attn_out)
-        # Note: final norm applied outside in the main forward for flexibility
+        # Gated residual connection
+        gated_update = self.gate * self.dropout(attn_out)
+        output = rna_repr + gated_update
+        output = self.norm_out(output)
+        return output
 
 
 class CrossModalFusionLayer(nn.Module):
@@ -421,6 +470,11 @@ class CrossModalFusionLayer(nn.Module):
     A fusion layer that combines RNA and Protein representations through
     both self-attention (within each modality) and cross-attention
     (between modalities). This is inserted after the main transformer encoder.
+
+    Improved version with:
+      - Deeper fusion network
+      - Better gating mechanism
+      - Shared modality-specific projections
     """
 
     def __init__(self, d_model: int, nhead: int, dropout: float = 0.1):
@@ -428,10 +482,17 @@ class CrossModalFusionLayer(nn.Module):
         self.rna_to_prot = CrossModalCrossAttention(d_model, nhead, dropout)
         self.prot_to_rna = CrossModalCrossAttention(d_model, nhead, dropout)
         self.fusion_norm = nn.LayerNorm(d_model)
+        # Improved gating with deeper network
         self.fusion_gate = nn.Sequential(
+            nn.Linear(d_model * 2, d_model * 2),
+            nn.GELU(),
+            nn.LayerNorm(d_model * 2),
             nn.Linear(d_model * 2, d_model),
             nn.Sigmoid(),
         )
+        # Modality-specific output projections
+        self.rna_proj = nn.Linear(d_model, d_model)
+        self.prot_proj = nn.Linear(d_model, d_model)
 
     def forward(self, rna_repr: Tensor, prot_repr: Tensor,
                 rna_mask: Optional[Tensor] = None,
@@ -454,6 +515,10 @@ class CrossModalFusionLayer(nn.Module):
 
         fused_rna = rna_repr + rna_gate * rna_updated
         fused_prot = prot_repr + prot_gate * prot_updated
+
+        # Modality-specific projections
+        fused_rna = self.rna_proj(fused_rna)
+        fused_prot = self.prot_proj(fused_prot)
 
         fused_rna = self.fusion_norm(fused_rna)
         fused_prot = self.fusion_norm(fused_prot)
@@ -632,6 +697,9 @@ class PCTAIMTransformerModel(nn.Module):
         ntokens_mod: Optional[int] = None,
         vocab_mod: Optional[Any] = None,
         use_mod: bool = False,
+        # ---- PCT-AIM: dedicated perturbation prediction ----
+        use_pert_pred: bool = False,
+        n_pert_pred_labels: Optional[int] = None,
     ):
         super().__init__()
         self.model_type = "PCTAIM-Transformer"
@@ -666,6 +734,12 @@ class PCTAIMTransformerModel(nn.Module):
         # ---- Base encoders ----
         self.encoder = GeneEncoder(ntoken, d_model, padding_idx=vocab[pad_token])
 
+        # ---- Expression flag encoder (binary: 0=not expressed, 1=expressed) ----
+        # This matches the pretrained scGPT whole-human model architecture.
+        # The flag encoder helps the model distinguish zero vs non-zero expression.
+        self.flag_encoder = nn.Embedding(2, d_model, padding_idx=None)
+        nn.init.normal_(self.flag_encoder.weight, mean=0.0, std=0.02)
+
         if input_emb_style == "continuous":
             self.value_encoder = ContinuousValueEncoder(d_model, dropout)
         elif input_emb_style == "category":
@@ -683,6 +757,12 @@ class PCTAIMTransformerModel(nn.Module):
             self.pert_encoder = PerturbationConditionEncoder(
                 num_perturbations, d_model, padding_idx=0,
                 per_gene=pert_per_gene)
+
+        # ---- [PCT-AIM] Perturbation Prediction Head ----
+        self.use_pert_pred = use_pert_pred
+        if use_pert_pred and n_pert_pred_labels is not None and n_pert_pred_labels > 0:
+            self.pert_predictor = PerturbationPredictor(
+                d_model, n_pert_pred_labels, nlayers=3)
 
         # ---- [PCT-AIM] Modality encoder for cross-modal ----
         if use_mod:
@@ -739,20 +819,29 @@ class PCTAIMTransformerModel(nn.Module):
 
         self.sim = Similarity(temp=0.5)
         self.creterion_cce = nn.CrossEntropyLoss()
+        self.criterion_bce = nn.BCEWithLogitsLoss()
 
         self.init_weights()
 
     def init_weights(self) -> None:
         initrange = 0.1
         self.encoder.embedding.weight.data.uniform_(-initrange, initrange)
-        # Initialize pert_encoder scale to start with stronger perturbation signal
+        # Initialize pert_encoder scale
         if hasattr(self, 'pert_encoder'):
-            nn.init.constant_(self.pert_encoder.scale, 1.0)
+            nn.init.constant_(self.pert_encoder.scale, 0.5)
         # Xavier init for linear layers in value encoder
         if isinstance(self.value_encoder, ContinuousValueEncoder):
             for name, param in self.value_encoder.named_parameters():
                 if 'weight' in name and param.dim() >= 2:
                     nn.init.xavier_uniform_(param)
+        # Initialize perturbation predictor final layer with small weights
+        if hasattr(self, 'pert_predictor'):
+            for name, param in self.pert_predictor.named_parameters():
+                if 'classifier.weight' in name or 'classifier.bias' in name:
+                    nn.init.zeros_(param)  # Start with no prediction bias
+        # Initialize flag_encoder to prefer expressed state
+        if hasattr(self, 'flag_encoder'):
+            nn.init.normal_(self.flag_encoder.weight, mean=0.0, std=0.02)
 
     def _encode(
         self,
@@ -775,6 +864,13 @@ class PCTAIMTransformerModel(nn.Module):
             total_embs = src * values_emb
         else:
             total_embs = src + values_emb
+
+        # ---- Expression flag embedding (binary: 0=not expressed, 1=expressed) ----
+        # This matches the pretrained scGPT architecture and improves expression
+        # modeling by explicitly encoding which genes are detected.
+        flag = (values > 0).long()
+        flag_emb = self.flag_encoder(flag)
+        total_embs = total_embs + flag_emb
 
         # ---- [PCT-AIM] Fuse perturbation condition ----
         if self.use_pert_cond and hasattr(self, 'pert_encoder') and pert_labels is not None:
@@ -849,6 +945,8 @@ class PCTAIMTransformerModel(nn.Module):
         prot_src: Optional[Tensor] = None,
         prot_values: Optional[Tensor] = None,
         prot_key_padding_mask: Optional[Tensor] = None,
+        # Perturbation prediction target
+        pert_target: Optional[Tensor] = None,
     ) -> Mapping[str, Tensor]:
         """
         Forward pass with support for:
@@ -966,6 +1064,14 @@ class PCTAIMTransformerModel(nn.Module):
             cos_sim = F.relu(cos_sim)
             output["loss_ecs"] = torch.mean(1 - (cos_sim - self.ecs_threshold) ** 2)
 
+        # ---- [PCT-AIM] Perturbation Prediction ----
+        if self.use_pert_pred and hasattr(self, 'pert_predictor'):
+            pert_pred = self.pert_predictor(cell_emb)
+            output["pert_pred"] = pert_pred
+            if pert_target is not None:
+                # Multi-label BCE loss
+                output["loss_pert_pred"] = self.criterion_bce(pert_pred, pert_target.float())
+
         # ---- DAB (adversarial batch correction) ----
         if self.do_dab:
             output["dab_output"] = self.grad_reverse_discriminator(cell_emb)
@@ -1037,6 +1143,12 @@ class PCTAIMTransformerModel(nn.Module):
                 total_embs = src + values_emb
         else:
             total_embs = src
+
+        # Expression flag embedding
+        if values is not None:
+            flag = (values > 0).long()
+            flag_emb = self.flag_encoder(flag)
+            total_embs = total_embs + flag_emb
 
         if self.use_pert_cond and hasattr(self, 'pert_encoder') and pert_labels is not None:
             pert_emb = self.pert_encoder(pert_labels)

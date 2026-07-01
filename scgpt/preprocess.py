@@ -235,13 +235,19 @@ class Preprocessor:
             is used in the highly variable gene selection step.
         """
         data = _get_obs_rep(adata, layer=obs_key)
+        if data.size == 0:
+            logger.warning("Empty data, assuming not logged")
+            return False
         max_, min_ = data.max(), data.min()
         if max_ > 30:
             return False
         if min_ < 0:
             return False
 
-        non_zero_min = data[data > 0].min()
+        non_zero = data[data > 0]
+        if non_zero.size == 0:
+            return False
+        non_zero_min = non_zero.min()
         if non_zero_min >= 1:
             return False
 

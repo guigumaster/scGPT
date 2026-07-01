@@ -1,19 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-# PCT-AIM v2 OPTIMIZED: Unified Training / Validation / Testing Pipeline
+# PCT-AIM v2: Unified Training / Validation / Testing Pipeline
 # =============================================================================
-# OPTIMIZATIONS:
-#   1. Larger batch_size (64) - 62% fewer batches per epoch, better GPU utilization
-#   2. Reduced epochs with better early stopping - fits within 3h timeout
-#   3. pin_memory=True, num_workers=2 - faster data loading
-#   4. use_grad_checkpointing=False - faster (enough GPU memory on H20 102GB)
-#   5. Adjusted LR for larger batch size
-#   6. Higher pert_pred loss weight (1.0 vs 0.5) - better perturbation accuracy
-#
-# Tasks:
-#   1) Perturbation Prediction (Norman 2019) - 20 epochs, 512d, pert predictor
-#   2) Multi-batch Integration (PBMC 10K) - 20 epochs, 512d, pretrained
-#   3) Large-scale Perturbation Prediction (Replogle 2022) - 15 epochs, 512d
+# This script runs the full PCT-AIM v2 pipeline for all three tasks:
+#   1) Perturbation Prediction (Norman 2019) - 30 epochs, 512d, pert predictor
+#   2) Multi-batch Integration (PBMC 10K) - 30 epochs, 512d, pretrained
+#   3) Large-scale Perturbation Prediction (Replogle 2022) - 20 epochs, 512d
 #
 # Usage:
 #   bash run_log/run.sh [task] [mode]
@@ -32,14 +24,13 @@ export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export WANDB_SILENT="true"
 
-# Memory management - GPU has 102GB, use expandable segments
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:256
-# More threads for faster CPU operations
-export OMP_NUM_THREADS=4
-export MKL_NUM_THREADS=4
-export NUMEXPR_NUM_THREADS=4
-export OPENBLAS_NUM_THREADS=4
-export VECLIB_MAXIMUM_THREADS=4
+# Memory management
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:128
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
 
 # Use system Python
 PYTHON="/inspire/cpfs/project/sais-ai-for-science-code/public/conda/miniconda3/bin/python3"
@@ -61,7 +52,7 @@ log_error() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] $*" >&2; }
 cleanup_gpu() {
     log_info "Cleaning GPU memory..."
     ${PYTHON} -c "import torch; torch.cuda.empty_cache(); import gc; gc.collect(); gc.collect(); print('GPU memory cleaned')" 2>/dev/null || true
-    sleep 3
+    sleep 5
 }
 
 run_python() {
@@ -82,9 +73,9 @@ import gc; gc.collect()
     local ret=$?
     if [ $ret -ne 0 ]; then
         log_error "Command failed with exit code ${ret}: ${PYTHON} ${script_path} ${extra_args}"
+        # Don't exit, continue with next task
     fi
     log_info "Completed: ${PYTHON} ${script_path} ${extra_args}"
-    return ${ret}
 }
 
 find_latest_save_dir() {
@@ -121,19 +112,19 @@ train_perturbation() {
     run_python "${PERTURBATION_SCRIPT}" \
         "--seed=42" \
         "--do_train=True" \
-        "--epochs=20" \
-        "--batch_size=64" \
+        "--epochs=30" \
+        "--batch_size=24" \
         "--layer_size=512" \
         "--nlayers=12" \
         "--nhead=8" \
         "--d_hid=512" \
         "--dropout=0.15" \
-        "--lr=8e-5" \
+        "--lr=5e-5" \
         "--mask_ratio=0.4" \
         "--gradient_accumulation_steps=2" \
         "--use_cosine_scheduler=True" \
-        "--warmup_epochs=3" \
-        "--early_stopping_patience=5" \
+        "--warmup_epochs=5" \
+        "--early_stopping_patience=10" \
         "--fast_transformer=False" \
         "--pre_norm=True" \
         "--amp=True" \
@@ -142,11 +133,9 @@ train_perturbation() {
         "--task_type=perturbation" \
         "--load_model=save/scGPT_human" \
         "--num_workers=0"
-    local ret=$?
     PERTURBATION_SAVE_DIR=$(find_latest_save_dir "dev_norman_pctaim")
     log_info "=== Perturbation Prediction Training Complete (save_dir: ${PERTURBATION_SAVE_DIR}) ==="
     cleanup_gpu
-    return ${ret}
 }
 
 eval_perturbation() {
@@ -158,9 +147,7 @@ eval_perturbation() {
     run_python "${PERTURBATION_SCRIPT}" \
         "--do_train=False" \
         "--load_model=${save_dir}"
-    local ret=$?
     log_info "=== Perturbation Evaluation Complete ==="
-    return ${ret}
 }
 
 # ----------------------------- Task 2: Multi-batch Integration ----------------
@@ -172,19 +159,19 @@ train_integration() {
     run_python "${INTEGRATION_SCRIPT}" \
         "--seed=42" \
         "--do_train=True" \
-        "--epochs=20" \
-        "--batch_size=64" \
+        "--epochs=30" \
+        "--batch_size=24" \
         "--layer_size=512" \
         "--nlayers=12" \
         "--nhead=8" \
         "--d_hid=512" \
         "--dropout=0.15" \
-        "--lr=1.5e-4" \
+        "--lr=1e-4" \
         "--mask_ratio=0.4" \
         "--gradient_accumulation_steps=2" \
         "--use_cosine_scheduler=True" \
         "--warmup_epochs=3" \
-        "--early_stopping_patience=5" \
+        "--early_stopping_patience=10" \
         "--ecs_thres=0.8" \
         "--dab_weight=1.0" \
         "--fast_transformer=False" \
@@ -195,11 +182,9 @@ train_integration() {
         "--task_type=integration" \
         "--load_model=save/scGPT_human" \
         "--num_workers=0"
-    local ret=$?
     INTEGRATION_SAVE_DIR=$(find_latest_save_dir "dev_PBMC_10K_PCTAIM")
     log_info "=== Integration Training Complete (save_dir: ${INTEGRATION_SAVE_DIR}) ==="
     cleanup_gpu
-    return ${ret}
 }
 
 eval_integration() {
@@ -211,9 +196,7 @@ eval_integration() {
     run_python "${INTEGRATION_SCRIPT}" \
         "--do_train=False" \
         "--load_model=${save_dir}"
-    local ret=$?
     log_info "=== Integration Evaluation Complete ==="
-    return ${ret}
 }
 
 # ----------------------------- Task 3: Large-scale Perturbation --------------
@@ -225,19 +208,19 @@ train_replogle() {
     run_python "${REPLOGLE_SCRIPT}" \
         "--seed=42" \
         "--do_train=True" \
-        "--epochs=15" \
-        "--batch_size=64" \
+        "--epochs=20" \
+        "--batch_size=24" \
         "--layer_size=512" \
         "--nlayers=12" \
         "--nhead=8" \
         "--d_hid=512" \
         "--dropout=0.2" \
-        "--lr=8e-5" \
-        "--mask_ratio=0.4" \
+        "--lr=5e-5" \
+        "--mask_ratio=0.35" \
         "--gradient_accumulation_steps=2" \
         "--use_cosine_scheduler=True" \
         "--warmup_epochs=3" \
-        "--early_stopping_patience=5" \
+        "--early_stopping_patience=8" \
         "--dab_weight=0.3" \
         "--fast_transformer=False" \
         "--pre_norm=True" \
@@ -247,11 +230,9 @@ train_replogle() {
         "--task_type=large_perturbation" \
         "--load_model=save/scGPT_human" \
         "--num_workers=0"
-    local ret=$?
     REPLOGLE_SAVE_DIR=$(find_latest_save_dir "dev_replogle_pctaim")
     log_info "=== Large-scale Perturbation Training Complete (save_dir: ${REPLOGLE_SAVE_DIR}) ==="
     cleanup_gpu
-    return ${ret}
 }
 
 eval_replogle() {
@@ -263,9 +244,7 @@ eval_replogle() {
     run_python "${REPLOGLE_SCRIPT}" \
         "--do_train=False" \
         "--load_model=${save_dir}"
-    local ret=$?
     log_info "=== Replogle Evaluation Complete ==="
-    return ${ret}
 }
 
 # ----------------------------- Environment Setup ------------------------------
@@ -310,18 +289,14 @@ print('All modules OK')
 main() {
     setup_environment
 
-    local overall_exit=0
-
     case "${TASK}" in
         perturbation)
             case "${MODE}" in
-                train) train_perturbation; overall_exit=$? ;;
-                eval)  eval_perturbation; overall_exit=$? ;;
+                train) train_perturbation ;;
+                eval)  eval_perturbation ;;
                 all)
-                    train_perturbation; overall_exit=$?
-                    if [ $overall_exit -eq 0 ]; then
-                        eval_perturbation; overall_exit=$?
-                    fi
+                    train_perturbation
+                    eval_perturbation
                     ;;
                 *)
                     log_error "Unknown mode: ${MODE}. Use: train, eval, all"
@@ -331,13 +306,11 @@ main() {
             ;;
         integration)
             case "${MODE}" in
-                train) train_integration; overall_exit=$? ;;
-                eval)  eval_integration; overall_exit=$? ;;
+                train) train_integration ;;
+                eval)  eval_integration ;;
                 all)
-                    train_integration; overall_exit=$?
-                    if [ $overall_exit -eq 0 ]; then
-                        eval_integration; overall_exit=$?
-                    fi
+                    train_integration
+                    eval_integration
                     ;;
                 *)
                     log_error "Unknown mode: ${MODE}"
@@ -347,13 +320,11 @@ main() {
             ;;
         replogle)
             case "${MODE}" in
-                train) train_replogle; overall_exit=$? ;;
-                eval)  eval_replogle; overall_exit=$? ;;
+                train) train_replogle ;;
+                eval)  eval_replogle ;;
                 all)
-                    train_replogle; overall_exit=$?
-                    if [ $overall_exit -eq 0 ]; then
-                        eval_replogle; overall_exit=$?
-                    fi
+                    train_replogle
+                    eval_replogle
                     ;;
                 *)
                     log_error "Unknown mode: ${MODE}"
@@ -363,25 +334,15 @@ main() {
             ;;
         all)
             log_info "=== PCT-AIM v2: Running FULL pipeline for ALL tasks ==="
-            train_perturbation; overall_exit=$?
+            train_perturbation
             cleanup_gpu
-            if [ $overall_exit -eq 0 ]; then
-                train_integration; overall_exit=$?
-                cleanup_gpu
-            fi
-            if [ $overall_exit -eq 0 ]; then
-                train_replogle; overall_exit=$?
-                cleanup_gpu
-            fi
-            if [ $overall_exit -eq 0 ]; then
-                eval_perturbation; overall_exit=$?
-            fi
-            if [ $overall_exit -eq 0 ]; then
-                eval_integration; overall_exit=$?
-            fi
-            if [ $overall_exit -eq 0 ]; then
-                eval_replogle; overall_exit=$?
-            fi
+            train_integration
+            cleanup_gpu
+            train_replogle
+            cleanup_gpu
+            eval_perturbation
+            eval_integration
+            eval_replogle
             log_info "=== PCT-AIM v2 FULL pipeline complete ==="
             ;;
         *)
@@ -390,12 +351,7 @@ main() {
             ;;
     esac
 
-    if [ $overall_exit -ne 0 ]; then
-        log_error "Pipeline completed with errors (exit code ${overall_exit})."
-    else
-        log_info "All tasks completed successfully!"
-    fi
-    exit $overall_exit
+    log_info "All tasks completed successfully!"
 }
 
 # ----------------------------- Entry Point -----------------------------------

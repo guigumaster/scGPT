@@ -13,6 +13,7 @@ from .pctaim_model import (
     CrossModalCrossAttention,
     CrossModalFusionLayer,
     task_adaptive_mask_value,
+    PerturbationPredictor,
 )
 from .dsbn import *
 from .grad_reverse import *

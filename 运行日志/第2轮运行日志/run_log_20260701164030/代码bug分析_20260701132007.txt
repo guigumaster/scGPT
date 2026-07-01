@@ -1,0 +1,40 @@
+Let me continue reading the rest of the log to see the full execution outcome.
+
+## 分析结论
+
+通过完整分析执行日志 (`execute_log.log`)，发现以下 **严重问题**：
+
+### 1. 🚨 严重 CUDA 索引越界错误（核心错误）
+在执行第一个任务 **Perturbation Prediction (Norman 2019)** 时，触发了大量 PyTorch CUDA 断言失败：
+
+```
+/pytorch/aten/src/ATen/native/cuda/Indexing.cu:1422: indexSelectLargeIndex: ... Assertion `srcIndex < srcSelectDimSize` failed.
+```
+
+日志中连续出现 **数千行** 此类错误（覆盖 block 0~77、thread 0~127 等多个GPU线程块），说明模型在前向传播时访问了超出张量维度范围的索引。
+
+### 2. 预训练模型参数未完全加载
+```
+scGPT - INFO - Loaded 158/163 params
+scGPT - INFO - Skipped 5 keys
+```
+模型仅加载了 158/163 个参数，有 5 个 key 被跳过（`flag_encoder.weight`, `decoder.fc.0.weight`, `mvc_decoder` 相关权重）。
+
+### 3. 任务执行失败
+```
+[2026-07-01 13:19:25] [ERROR] Command failed with exit code 1
+```
+Perturbation 训练任务以 **非零退出码 (1)** 失败。
+
+### 4. 后续全部任务被跳过
+由于 pipeline 使用 `if [ $overall_exit -eq 0 ]` 条件判断，Perturbation 失败后：
+- **Integration (PBMC 10K)** 训练 → 被跳过
+- **Replogle 大规模扰动预测** 训练 → 被跳过
+- **所有三个评估任务** → 全部被跳过
+
+### 5. 最终状态
+```
+[2026-07-01 13:19:41] [ERROR] Pipeline completed with errors (exit code 1).
+```
+
+**存在异常**

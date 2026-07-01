@@ -1,0 +1,137 @@
+Now let me read the data collator, loss, and trainer files:
+
+Let me now read the existing run_log and the previous PCT-AIM scriptsNow let me also read the integration and replogle scripts quickly for key differences:
+
+Now I have a thorough understanding of the codebase. Let me analyze the key issues and implement improvements.
+
+**Key problems identified from the feedback:**
+1. **Embedding dimension too small** (128/256 vs 512 in pretrained)
+2. **Pretrained weights not loaded properly** due to architecture mismatch
+3. **Too few epochs** (10-15) for convergence
+4. **Batch size too small** (8) leading to unstable gradients
+5. **No dedicated perturbation prediction head** - only using MLM proxy
+6. **Cross-modal attention not enabled** when needed
+7. **Insufficient warmup and learning rate scheduling**
+
+Let me start implementing the fixes:
+
+Let me implement the key improvements. First, I'll upgrade the PCT-AIM model architectureNow let me add a dedicated perturbation prediction head to the model:
+
+Now update the PCTAIMTransformerModel to include the perturbation predictor and better pretrained weight loading:
+
+Now let me add the perturbation predictor to the model init and update the forward method:
+
+Now let me update the model's `__init__.py` to export the new classesNow let me rewrite the three finetune scripts with proper hyperparameters and better training. Starting with the perturbation script:
+
+Now let me create the improved finetune scripts. I'll start with the perturbation scriptNow let me rewrite the integration script with improved parametersNow let me write the improved Replogle scriptNow let me update the run.sh script to use the improved parametersLet me verify the scgpt package exports and the pretrained model locationI need to update the weight loading to handle the FlashMHA->PyTorch MHA key mapping. Let me update all three scriptsLet me verify the file permissions and check the scripts for any issuesLet me now verify the complete list of modified files以下是所有修改的完整总结：
+
+---
+
+## 代码修改总结
+
+### 修改的文件
+
+#### 1. `scgpt/model/pctaim_model.py` - PCT-AIM 模型架构改进
+
+**PerturbationConditionEncoder 改进：**
+- 添加了额外的 MLP 投影层（`pert_proj`），用于将扰动嵌入投影到更丰富的表示空间
+- 改进了初始化，使缩放因子从 0.5 开始，以更好地平衡扰动信号
+
+**CrossModalCrossAttention 改进：**
+- 添加了 Pre-LN 架构（`norm_q`、`norm_kv`）
+- 添加了可学习的门控参数（`gate`），用于自适应融合
+- 添加了输出归一化层（`norm_out`）
+
+**CrossModalFusionLayer 改进：**
+- 使用更深的门控网络（2层 MLP 带 GELU 激活）
+- 添加了模态特定的输出投影（`rna_proj`、`prot_proj`）
+
+**新增 PerturbationPredictor 类：**
+- 专用的多层感知机扰动预测头
+- 支持多标签 BCE 分类
+- 3层架构，含 LayerNorm 和 GELU 激活
+
+**PCTAIMTransformerModel 更新：**
+- 添加 `use_pert_pred` 和 `n_pert_pred_labels` 参数
+- 添加 `criterion_bce` 作为扰动预测损失函数
+- 在 forward 方法中添加 `pert_target` 参数
+- 改进的权重初始化策略
+
+#### 2. `scgpt/model/__init__.py` - 导出新类
+
+#### 3. `data/finetune_perturbation_pctaim.py` - 改进的扰动预测脚本
+
+**关键参数变更：**
+
+| 参数 | 旧值 | 新值 |
+|---------|------|------|
+| layer_size | 256 | 512 |
+| nlayers | 4 | 12 |
+| nhead | 8 | 8 (不变) |
+| d_hid | 256 | 512 |
+| epochs | 10 | 30 |
+| batch_size | 8 | 24 |
+| lr | 5e-5 | 5e-5 (不变) |
+| warmup_epochs | 3 | 5 |
+| dropout | 0.2 | 0.15 |
+| gradient_accumulation | 4 | 2 |
+| pre_norm | False | True |
+| 新增 use_pert_pred | - | True |
+
+**架构改进：**
+- 加载预训练的 scGPT_human 权重（512维，12层）
+- 新增 `PerturbationPredictor` 预测头，用于多标签扰动分类
+- 智能权重加载，处理 FlashMHA (Wqkv) → PyTorch MHA (in_proj_weight) 的键映射
+- 骨干网络和新头部使用不同的学习率（新头部5倍学习率）
+- 梯度检查点以节省内存
+
+#### 4. `data/finetune_integration_pctaim.py` - 改进的整合脚本
+
+**关键参数变更：**
+
+| 参数 | 旧值 | 新值 |
+|---------|------|------|
+| layer_size | 128 | 512 |
+| nlayers | 4 | 12 |
+| d_hid | 128 | 512 |
+| epochs | 15 | 30 |
+| batch_size | 8 | 24 |
+| pre_norm | False | True |
+
+- 加载预训练的 scGPT_human 权重
+- 智能权重映射
+
+#### 5. `data/finetune_replogle_pctaim.py` - 改进的大规模扰动脚本
+
+**关键参数变更：**
+
+| 参数 | 旧值 | 新值 |
+|---------|------|------|
+| layer_size | 256 | 512 |
+| nlayers | 4 | 12 |
+| d_hid | 256 | 512 |
+| epochs | 10 | 20 |
+| batch_size | 8 | 24 |
+| 新增 use_pert_pred | - | True |
+
+- 加载预训练的 scGPT_human 权重
+- 新增 `PerturbationPredictor` 预测头
+- 智能权重映射
+
+#### 6. `run_log/run.sh` - 统一管道脚本
+
+- 更新了所有三个任务的参数，以使用改进后的超参数
+- 保持与旧脚本相同的接口，便于使用 `bash run_log/run.sh all` 执行
+
+### 运行说明
+
+```bash
+# 运行所有三个任务（训练+评估）
+cd /inspire/cpfs/project/sais-ai-for-science-code/public/mession/running_location/da2c8100-835c-4cc8-8753-fb2b2535da49/scGPT/code/3119b63d-2222-4c9e-8c0b-e395303b5f91/scGPT
+bash run_log/run.sh all
+
+# 或单独运行某个任务
+bash run_log/run.sh perturbation train
+bash run_log/run.sh integration train
+bash run_log/run.sh replogle train
+```

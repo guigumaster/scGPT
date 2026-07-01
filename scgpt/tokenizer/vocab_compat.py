@@ -201,9 +201,15 @@ class BuiltinVocab:
                     f"{self._stoi[token]}, cannot re-insert at {index}."
                 )
             return
-        self._itos.insert(index, token)
-        # Rebuild stoi from scratch (insertion shifts all subsequent indices).
-        self._stoi = {tok: idx for idx, tok in enumerate(self._itos)}
+        # Optimization: if inserting at the end, just append (no shift needed)
+        if index == len(self._itos):
+            self._itos.append(token)
+            self._stoi[token] = index
+        else:
+            self._itos.insert(index, token)
+            # Incrementally update stoi for shifted tokens only
+            for i in range(index, len(self._itos)):
+                self._stoi[self._itos[i]] = i
 
 
 # ---------------------------------------------------------------------------
