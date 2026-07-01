@@ -17,6 +17,9 @@ from .flash_attn_compat import FlashMHA, flash_attn_available
 from .dsbn import DomainSpecificBatchNorm1d
 from .grad_reverse import grad_reverse
 
+# Import shared GAGM components from model.py (not duplicated in this file)
+from .model import GatedFusionEncoder, PerturbationEncoder
+
 
 class MultiOmicTransformerModel(nn.Module):
     def __init__(
@@ -53,6 +56,7 @@ class MultiOmicTransformerModel(nn.Module):
         use_gagm: bool = False,
         do_pert: bool = False,
         num_pert_types: Optional[int] = None,
+        gate_entropy_weight: float = 0.0,
     ):
         super().__init__()
         self.model_type = "Transformer"
@@ -68,6 +72,7 @@ class MultiOmicTransformerModel(nn.Module):
         self.use_mod = use_mod
         self.use_gagm = use_gagm
         self.do_pert = do_pert
+        self.gate_entropy_weight = gate_entropy_weight
 
         if self.input_emb_style not in ["category", "continuous", "scaling"]:
             raise ValueError(
@@ -518,9 +523,14 @@ class MultiOmicTransformerModel(nn.Module):
             from scgpt.loss import cell_type_contrastive_loss
             loss_ctc = cell_type_contrastive_loss(
                 cell_emb, celltype_labels, batch_labels,
-                temperature=0.2, batch_weight=0.5,
+                temperature=0.5, batch_weight=0.7,
             )
             output["loss_ctc"] = loss_ctc
+
+        # Gate entropy regularization to prevent gate collapse in GAGM
+        if self.use_gagm and self.gate_entropy_weight > 0 and hasattr(self, 'gated_fusion'):
+            gate_entropy = self.gated_fusion.get_gate_entropy()
+            output["loss_gate_entropy"] = -self.gate_entropy_weight * gate_entropy
 
         if self.do_dab:
             output["dab_output"] = self.grad_reverse_discriminator(cell_emb)
@@ -824,133 +834,6 @@ class GeneEncoder(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         x = self.embedding(x)  # (batch, seq_len, embsize)
         x = self.enc_norm(x)
-        return x
-
-
-class GatedFusionEncoder(nn.Module):
-    """
-    GAGM (Gene Adaptive Gating Modulation) v2 - Enhanced Architecture
-
-    Gene-adaptive nonlinear gated modulation that replaces simple addition
-    for fusing gene embeddings and expression values. Enhanced with:
-
-      - Multi-head gating with parallel gate heads
-      - Highway-style two-layer gate projection with GELU activation
-      - Learnable gate bias initialized to +2 (sigmoid ~0.88)
-      - Fusion projection + LayerNorm for stable representations
-      - Residual connection with learnable scale
-      - Dropout on gate outputs for regularization
-    """
-
-    def __init__(self, d_model: int, n_gate_heads: int = 4, gate_dropout: float = 0.1):
-        super().__init__()
-        self.n_gate_heads = n_gate_heads
-        head_dim = d_model // n_gate_heads
-
-        self.gate_net = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
-            nn.GELU(),
-            nn.Dropout(gate_dropout),
-            nn.Linear(d_model, d_model),
-        )
-        nn.init.xavier_uniform_(self.gate_net[0].weight, gain=0.5)
-        nn.init.zeros_(self.gate_net[0].bias)
-        nn.init.xavier_uniform_(self.gate_net[3].weight, gain=0.1)
-        nn.init.zeros_(self.gate_net[3].bias)
-
-        self.gate_bias = nn.Parameter(torch.full((1, 1, d_model), 2.0))
-
-        self.fusion_norm = nn.LayerNorm(d_model)
-        self.fusion_proj = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-            nn.Dropout(gate_dropout),
-        )
-        nn.init.xavier_uniform_(self.fusion_proj[0].weight, gain=0.5)
-        nn.init.zeros_(self.fusion_proj[0].bias)
-
-        self.out_proj = nn.Linear(d_model, d_model)
-        nn.init.xavier_uniform_(self.out_proj.weight, gain=0.1)
-        nn.init.zeros_(self.out_proj.bias)
-
-        self.residual_gate = nn.Parameter(torch.full((1,), 0.3))
-
-    def forward(self, gene_emb: Tensor, value_emb: Tensor) -> Tensor:
-        """
-        Args:
-            gene_emb: Tensor, shape [batch_size, seq_len, d_model]
-            value_emb: Tensor, shape [batch_size, seq_len, d_model]
-        Returns:
-            fused_emb: Tensor, shape [batch_size, seq_len, d_model]
-        """
-        combined = torch.cat([gene_emb, value_emb], dim=-1)
-        gate_logits = self.gate_net(combined) + self.gate_bias
-        gate = torch.sigmoid(gate_logits)
-
-        fused = gate * gene_emb + (1 - gate) * value_emb
-
-        fused = self.fusion_norm(fused)
-        fused_proj = self.fusion_proj(fused)
-        fused = fused + fused_proj
-
-        fused = self.out_proj(fused)
-        fused = fused + self.residual_gate * gene_emb
-        return fused
-
-
-class PerturbationEncoder(nn.Module):
-    """
-    Perturbation-aware conditional embedding encoder v2.
-
-    Enhanced with:
-      - Learnable scale factor per perturbation type for adaptive injection
-      - Two-layer MLP with residual connection after embedding
-      - LayerNorm for stable training
-      - Dropout for regularization
-    """
-
-    def __init__(
-        self,
-        num_pert_types: int,
-        embedding_dim: int,
-        padding_idx: Optional[int] = None,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        self.embedding = nn.Embedding(
-            num_pert_types, embedding_dim, padding_idx=padding_idx
-        )
-        self.enc_norm = nn.LayerNorm(embedding_dim)
-        self.pert_mlp = nn.Sequential(
-            nn.Linear(embedding_dim, embedding_dim * 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(embedding_dim * 2, embedding_dim),
-            nn.Dropout(dropout),
-        )
-        nn.init.xavier_uniform_(self.pert_mlp[0].weight, gain=0.5)
-        nn.init.zeros_(self.pert_mlp[0].bias)
-        nn.init.xavier_uniform_(self.pert_mlp[3].weight, gain=0.1)
-        nn.init.zeros_(self.pert_mlp[3].bias)
-
-        self.pert_scale = nn.Parameter(torch.ones(num_pert_types))
-
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Args:
-            x: Tensor, shape [batch_size], perturbation type ids
-        Returns:
-            Tensor, shape [batch_size, embedding_dim]
-        """
-        # Save original integer indices before embedding converts them to floats
-        pert_ids = x  # shape [batch_size], dtype long
-        x = self.embedding(x)
-        x = self.enc_norm(x)
-        x_mlp = self.pert_mlp(x)
-        x = x + x_mlp
-        # Per-perturbation-type scale (use original integer ids as indices)
-        scale = self.pert_scale[pert_ids]  # (batch_size,)
-        x = x * scale.unsqueeze(1)
         return x
 
 

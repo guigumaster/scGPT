@@ -50,6 +50,7 @@ class TransformerModel(nn.Module):
         use_gagm: bool = False,
         do_pert: bool = False,
         num_pert_types: Optional[int] = None,
+        gate_entropy_weight: float = 0.0,
     ):
         super().__init__()
         self.model_type = "Transformer"
@@ -63,6 +64,7 @@ class TransformerModel(nn.Module):
         self.explicit_zero_prob = explicit_zero_prob
         self.use_gagm = use_gagm
         self.do_pert = do_pert
+        self.gate_entropy_weight = gate_entropy_weight
         self.norm_scheme = "pre" if pre_norm else "post"
         if self.input_emb_style not in ["category", "continuous", "scaling"]:
             raise ValueError(
@@ -464,14 +466,21 @@ class TransformerModel(nn.Module):
 
         if CTC and celltype_labels is not None:
             # Cell-type Contrastive (CTC) loss for cross-batch alignment.
-            # Delegated to the dedicated function in loss.py for consistency
+            # Uses the shared implementation from loss.py for consistency
             # and maintainability across TransformerModel and MultiOmicTransformerModel.
             from scgpt.loss import cell_type_contrastive_loss
             loss_ctc = cell_type_contrastive_loss(
                 cell_emb, celltype_labels, batch_labels,
-                temperature=0.2, batch_weight=0.5,
+                temperature=0.5, batch_weight=0.7,
             )
             output["loss_ctc"] = loss_ctc
+
+        # Gate entropy regularization to prevent gate collapse in GAGM
+        if self.use_gagm and self.gate_entropy_weight > 0 and hasattr(self, 'gated_fusion'):
+            gate_entropy = self.gated_fusion.get_gate_entropy()
+            # Invert entropy so we maximize it: loss = -entropy
+            # We want high entropy (balanced gating), so we minimize -entropy
+            output["loss_gate_entropy"] = -self.gate_entropy_weight * gate_entropy
 
         if self.do_dab:
             output["dab_output"] = self.grad_reverse_discriminator(cell_emb)
