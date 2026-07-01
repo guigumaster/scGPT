@@ -1,0 +1,29 @@
+## 日志分析结论
+
+经过对 `execute_log.log` 的完整分析，发现以下关键问题：
+
+### 异常详情
+
+在 **Stage 2 (PBMC 10K Integration Fine-tuning)** 的第 **18 个 epoch** 执行期间，程序抛出未捕获的异常并崩溃：
+
+```
+Traceback (most recent call last):
+  File "...Tutorial_Integration.py", line 1390, in <module>
+    main()
+  ...
+  File ".../scgpt/loss.py", line 34, in masked_relative_error
+    assert mask.any()
+AssertionError
+```
+
+这是一个 **`AssertionError`**，发生在 `masked_relative_error` 函数中，原因是 `mask` 中没有任何被掩码的位置（`mask.any()` 为 False），导致训练流程中断。
+
+### 影响
+
+- 训练原本计划执行 **20 个 epoch**，但在 **epoch 18** 时因该断言错误崩溃
+- 虽然外围 shell 脚本显示 `Exit code: 0` 并继续执行了后续的结果收集步骤，但 **Python 训练主程序本身在执行 epoch 18 时异常终止**，并未正常完成全部 20 个 epoch 的训练
+- 日志中 epoch 18 之后也没有正常的 epoch 19、epoch 20 输出
+
+### 结论
+
+**存在异常**

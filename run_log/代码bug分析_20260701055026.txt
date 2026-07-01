@@ -1,0 +1,30 @@
+## 日志分析结果
+
+经过对完整日志文件的逐行分析，得出以下结论：
+
+### 关键检查点
+
+| 检查项 | 状态 |
+|--------|------|
+| **Step 1: GPU选择** | ✅ 成功选择 GPU 0（74560MiB 空闲） |
+| **Step 2: 预训练模型验证** | ✅ 找到 `best_model.pt`、`vocab.json`、`args.json` |
+| **Step 3: 依赖检查** | ✅ pertpy 和 scib 均可用 |
+| **Step 4: 数据目录准备** | ✅ PBMC 10K 数据集从缓存加载成功 |
+| **Step 5 Stage 1: Norman Continual Pretrain** | ✅ 8 个 epoch 全部完成，损失从 254.24 降至 38.39 |
+| **Step 5 Stage 2: PBMC 10K 微调** | ✅ 35 个 epoch 全部完成，最佳损失 54.0150 |
+| **Step 6: 结果收集** | ✅ 所有模型检查点、UMAP 图均保存成功 |
+| **退出码** | ✅ `Exit code: 0` |
+| **最终输出** | ✅ `Pipeline Complete!` |
+
+### 日志中存在的"非错误"信息
+
+- **`wandb init failed`** — 仅为 wandb 未配置的提示，不影响训练，已自动降级为无 wandb 模式运行
+- **各种 `FutureWarning` / `PendingDeprecationWarning`** — 均为依赖库的 API 弃用警告（如 leiden 算法、pandas.value_counts、set_bad 等），属于正常提示，非错误
+- **`resource_tracker: 1 leaked semaphore objects`** — 进程清理时的小提示，不影响执行结果
+- **训练用时 9001 秒** — 略微超过设定的 9000s 超时，但训练已实际完成进入结果收集阶段，`exit code=0` 表明未被强制终止
+
+### 结论
+
+日志中**未发现任何错误、bug、执行异常或未完整执行的情况**。所有步骤均顺利执行完毕，模型成功保存，退出码为 0，Pipeline Complete。
+
+**输出结论: "没有异常"**

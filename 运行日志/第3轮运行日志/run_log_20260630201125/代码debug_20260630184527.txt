@@ -1,0 +1,55 @@
+Let me start by examining the project structure, log files, and run script to understand the issue.
+
+Let me examine the key source files to understand the issueLet me look at the Norman data loading and preprocess code:
+
+Now I have a clear understanding of the issue. Let me check the tar.gz structure to confirm:
+
+Now I understand the full picture. Let me check the GPU status and then implement the fixesGood, GPU 0 has 91 GB free. Now let me implement the fixes.
+
+**Root cause analysis:**
+1. `Tutorial_Integration.py` has module-level code calling `load_pbmc_dataset()` 
+2. `load_pbmc_dataset()` extracts tar.gz files then removes them after loading
+3. When DataLoader spawns workers with `spawn` start method, they re-import the module, re-executing `load_pbmc_dataset()` 
+4. Workers race on re-extracting the tar.gz, causing `FileNotFoundError`
+5. The Norman training never completes, and Stage 2 (PBMC integration) never starts
+
+**Fix plan:**
+1. Modify `pbmc_loader.py`: Cache PBMC data as h5ad; load from cache on subsequent calls
+2. Modify `Tutorial_Integration.py`: Wrap execution code in `if __name__ == "__main__":` guard; fix multiprocessing issues
+3. Improve the dataloader to use `num_workers=0` for Norman stage or fix the worker issue properly
+
+Now I have a complete understanding. Let me implement the fixes.
+
+**Fix 1**: Modify `pbmc_loader.py` to cache the loaded AnnData as h5ad so subsequent calls skip re-extraction.
+
+**Fix 2**: Modify `Tutorial_Integration.py` to wrap all runtime code in `if __name__ == "__main__":` so DataLoader workers (spawned with `spawn` method) don't re-execute data loadingNow I need to wrap the runtime code in `Tutorial_Integration.py` with a `if __name__ == "__main__":` guard. Let me find the right location:
+
+Let me look at the exact sections I need to guardGiven the size of `Tutorial_Integration.py` (1446 lines), I need to carefully wrap the runtime code. Let me take a targeted approach - I'll create a `main()` function to contain all runtime code and guard it with `if __name__ == "__main__":`. All class/function definitions stay at module level for worker access.
+
+Now I have a thorough understanding. Let me implement the fix for `Tutorial_Integration.py`. I'll wrap all runtime code in a `main()` function under `if __name__ == "__main__":`. Let me find the exact boundariesLet me refactor the file to properly guard all runtime code. I'll create a `main()` function approach:
+
+Let me take a more practical approach. I need to refactor the file to:
+1. Keep all function/class definitions at module level
+2. Wrap all runtime code in `if __name__ == "__main__":Given the complex structure, let me take a clean approach. I'll refactor the file by extracting all function/class definitions to module level and wrapping runtime code in a `main()` function. Let me first identify exactly what needs to moveGiven the complexity of the file (1446 lines with function definitions scattered throughout), let me take the pragmatic approach. I'll create a clean refactored version. Let me first read the remaining critical sectionsLet me take the clean approach - I'll rewrite the tutorial file with proper structure. First, let me save the original and get the complete contentNow let me write the refactored file. Given the 1446-line size, I'll write it in a restructured way with all function/class definitions at module level and runtime code in `main()`:
+
+Now let me verify the syntax of the rewritten file:
+
+The syntax is valid. Now let me update the `run.sh` to use the refactored pipeline with absolute paths and optimized settings
+
+
+
+Let me verify the modified pbmc_loader.py and then run the pipeline
+
+Let me check the current state and clean any old h5ad cache
+
+
+
+Good - the h5ad cache doesn't exist yet, so the pre-caching step in `run.sh` will create it. Now let me run the pipelineThe pipeline is working - data caches are being created and Norman training is progressing. I see a minor wandb variable scoping issue. Let me fix it and also update the config parameters to match the optimized v5 settings:
+
+I see the wandb scoping issue. The local variable `wandb` at line 602 shadows the module-level import. Let me fix this:
+
+Let me fix the wandb reference issue cleanly by using `wandb_logger` name throughout:
+
+Now let me update the `wandb.` calls inside `main()` to use `wandb_logger`I need to update the `wandb.` calls inside `main()` to use `wandb_logger`Now let me update the function calls that pass `wandb` parameter to use `wandb_loggerLet me verify the syntax and then re-run the pipeline
+
+Now let me also update the hyperparameters in the Python script to match the optimized v5 settings mentioned in run.sh. Let me update key parameters

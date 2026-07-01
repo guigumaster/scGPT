@@ -1,0 +1,34 @@
+## 分析结果
+
+**结论: "存在异常"**
+
+### 异常详情
+
+上一轮运行中存在一个明确的 Python 运行时错误，导致 Stage 2 (PBMC 10K Integration Fine-tuning) 未能正常执行。
+
+**关键错误信息（第 138-145 行）：**
+```
+Traceback (most recent call last):
+  File ".../tutorials/Tutorial_Integration.py", line 1393, in <module>
+    main()
+  File ".../tutorials/Tutorial_Integration.py", line 1225, in main
+    del norman_train_pt, norman_valid_pt, norman_train_loader, norman_valid_loader
+UnboundLocalError: cannot access local variable 'norman_train_pt' where it is not associated with a value
+```
+
+### 运行过程摘要
+
+| 阶段 | 状态 | 说明 |
+|------|------|------|
+| **Stage 1: Norman Continual Pretraining** | ✅ 完成 | 10 个 epoch 全部执行完毕，最佳模型已保存（valid loss/mse = 31.64） |
+| **Stage 2: PBMC 10K Integration Fine-tuning** | ❌ **失败** | 刚加载 Norman 权重后，在 `del` 清理变量时抛出 `UnboundLocalError`，变量 `norman_train_pt` 未被赋值即被引用 |
+| **结果收集** | ⚠️ 不完整 | PBMC 10K 保存目录中 `No .pt files found`，确认 Stage 2 未产生任何模型输出 |
+
+### 根因
+
+在 `Tutorial_Integration.py` 的 `main()` 函数中，第 1225 行试图 `del norman_train_pt, norman_valid_pt, norman_train_loader, norman_valid_loader`，但这些变量在当前作用域（Stage 2 的逻辑分支）中从未被定义/赋值。这说明 Stage 1 和 Stage 2 的代码路径之间存在变量作用域不一致的问题。
+
+### 附加说明
+
+- 脚本最终 exit code 为 0（因为 `timeout ... | tee` 管道中 `tee` 总是返回 0，掩盖了实际错误）
+- GPU 内存从训练前的 36633 MiB 降至训练后的 1627 MiB，说明 Stage 2 几乎未进行任何实质计算就退出了

@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # scGPT Two-Stage Training Pipeline (Optimized v7)
-# Stage 1: Continual Pretraining on Norman Perturb-seq Data (up to 8 epochs, 40% subsample)
+# Stage 1: Continual Pretraining on Norman Perturb-seq Data (up to 12 epochs, 90% subsample)
 # Stage 2: PBMC 10K Integration Fine-tuning (35 epochs)
 #
 # Key changes from v6:
@@ -147,15 +147,15 @@ echo "=========================================="
 echo "Step 5: Running Two-Stage Training (Optimized v5)"
 echo "=========================================="
 echo ""
-echo "Stage 1: Norman Continual Pretraining (up to 8 epochs, 40% subsample)"
-echo "  - Dataset: Norman Perturb-seq (K562, subsampled to ~44K cells)"
+echo "Stage 1: Norman Continual Pretraining (up to 12 epochs, 90% subsample)"
+echo "  - Dataset: Norman Perturb-seq (K562, subsampled to ~100K cells)"
 echo "  - Loss: MLM + MVC + ECS + DAR (perturbation as pseudo-batch)"
 echo "  - Learning Rate: 1.5e-4 with Cosine Annealing (eta_min=1e-6)"
-echo "  - Batch Size: 256, Gradient Accumulation: 2 steps (effective batch 512)"
-echo "  - HVGs: 2000 (capped by vocabulary match)"
-echo "  - DataLoader: Regular shuffled batching (2 workers)"
-echo "  - Early Stopping: patience=4, min_delta=5e-5"
-echo "  - Expected time: ~15-25 minutes"
+echo "  - Batch Size: 128, Gradient Accumulation: 2 steps (effective batch 256)"
+echo "  - HVGs: 2000 (more biological signal for better transfer)"
+echo "  - DataLoader Workers: 4 (parallel loading)"
+echo "  - Early Stopping: patience=5, min_delta=3e-5"
+echo "  - Expected time: ~35-50 minutes"
 echo ""
 echo "Stage 2: PBMC 10K Integration Fine-tuning (35 epochs)"
 echo "  - Dataset: PBMC 10K (10 batches)"
@@ -165,11 +165,11 @@ echo "  - Batch Size: 128, Gradient Accumulation: 2 steps"
 echo "  - Optimizer: AdamW (weight_decay=1e-4)"
 echo "  - dab_weight: 0.3, ecs_thres: 0.3 (balanced batch correction)"
 echo "  - mask_ratio: 0.35 with cosine decay schedule (min 0.08 floor)"
-echo "  - HVGs: 2000 (capped by vocabulary match)"
-echo "  - DataLoader: 2 workers (parallel loading)"
+echo "  - HVGs: 2000 (more biological signal for better integration)"
+echo "  - DataLoader Workers: 4 (parallel loading)"
 echo "  - Expected time: ~60-80 minutes"
 echo ""
-echo "Expected total time: ~75-105 minutes (well within 2.5-hour limit)"
+echo "Expected total time: ~95-130 minutes (well within 3-hour limit)"
 echo ""
 
 # Record GPU memory before training
@@ -250,7 +250,7 @@ echo "=========================================="
 echo "Pipeline Complete!"
 echo "=========================================="
 echo ""
-echo "Expected improvements (with Norman continual pretraining + optimized batching):"
+echo "Expected improvements (with Norman continual pretraining + v6 optimizations):"
 echo "  - avg_bio:  0.68 -> 0.75~0.85"
 echo "  - ARI:      0.02 -> 0.50~0.70 (targeting significant improvement)"
 echo "  - NMI:      improved"

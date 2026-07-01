@@ -1,0 +1,27 @@
+## 分析结果
+
+我仔细分析了 `execute_log.log` 文件，发现以下关键问题：
+
+### 发现问题
+
+1. **DataLoader worker 异常退出**（Stage 1 Norman 训练阶段）：
+   ```
+   RuntimeError: DataLoader worker (pid 3655151) exited unexpectedly with exit code 1.
+   ```
+
+2. **根本原因** — 多进程 worker 中读取 PBMC 数据集文件失败：
+   ```
+   FileNotFoundError: Did not find file .../pbmc8k/filtered_gene_bc_matrices/GRCh38/matrix.mtx.gz.
+   ```
+   这说明在 Norman 训练的数据加载过程中，子进程尝试加载 PBMC 数据时文件未找到，导致 worker 崩溃。
+
+3. **Stage 2 (PBMC 10K Integration Fine-tuning) 未执行**：
+   - 日志中完全没有 Stage 2 的训练日志
+   - 结果显示 `No .pt files found`（Stage 2 无 checkpoint 文件）
+   - 总耗时仅 **458 秒（~7.6 分钟）**，而预估 Stage 1 就需要 20-25 分钟，Stage 2 需要 30-35 分钟，说明训练在 Stage 1 就中断了
+
+4. **尽管 exit code = 0**，但实际训练过程存在严重运行时错误，未完成预期的两阶段训练。
+
+### 结论
+
+**存在异常**

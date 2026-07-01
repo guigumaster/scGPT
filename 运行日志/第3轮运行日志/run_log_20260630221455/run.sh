@@ -1,23 +1,21 @@
 #!/bin/bash
 # =============================================================================
-# scGPT Two-Stage Training Pipeline (Optimized v7)
-# Stage 1: Continual Pretraining on Norman Perturb-seq Data (up to 8 epochs, 40% subsample)
-# Stage 2: PBMC 10K Integration Fine-tuning (35 epochs)
+# scGPT Two-Stage Training Pipeline (Optimized v6)
+# Stage 1: Continual Pretraining on Norman Perturb-seq Data (up to 10 epochs, 90% subsample)
+# Stage 2: PBMC 10K Integration Fine-tuning (30 epochs)
 #
-# Key changes from v6:
-#   - FIXED: UnboundLocalError in Tutorial_Integration.py line 1225 where norman_train_pt
-#     was deleted inside the for-loop (line 1186) then attempted to delete again after the
-#     loop exited. Added try/except UnboundLocalError for safe cleanup.
-#   - FIXED: Cosine Annealing LR scheduler replaces StepLR for both Norman and PBMC stages,
-#     providing smoother learning rate decay and better convergence.
-#   - FIXED: AdamW optimizer with weight_decay=1e-4 for better regularization.
-#   - Increased Stage 2 epochs 30->35 for more fine-tuning convergence.
-#   - norman_epochs 10->12, norman_patience 4->5 (more patient early stopping).
-#   - n_hvg 1800->2000 (more biological signal from HVGs).
-#   - norman_min_delta 5e-5->3e-5 (stricter early stopping criterion).
-#   - Best model tracking now includes avg_bio-based selection (not just val_loss),
-#     ensuring the final saved model optimizes the evaluation metric directly.
-#   - Added final evaluation on best avg_bio model with saved UMAP plots.
+# Key changes from v5:
+#   - FIXED: AssertionError in masked_relative_error when mask is empty (cosine schedule
+#     decayed mask ratio to ~0.85% by epoch 18). Added minimum mask_ratio floor of 8%.
+#   - FIXED: masked_mse_loss/criterion_neg_log_bernoulli now handle empty masks gracefully.
+#   - Increased epochs 20->30 for Stage 2 to allow more convergence time for ARI.
+#   - norman_epochs 8->10, norman_subsample_ratio 0.7->0.9 (more pretraining data).
+#   - norman_patience 3->4, norman_min_delta 1e-4->5e-5 (more patient early stopping).
+#   - dab_weight 0.5->0.3, ecs_thres 0.5->0.3 (balanced batch correction).
+#   - mask_ratio 0.35 with cosine schedule (min 0.08 floor) for smoother learning.
+#   - n_hvg increased 1500->1800, norman_n_hvg 1500->1800 (more biological signal).
+#   - lr 5e-5->3e-5 for PBMC stage (more stable fine-tuning for higher ARI).
+#   - norman_lr 2e-4->1.5e-4 for more stable Norman pretraining.
 # =============================================================================
 
 set -e
@@ -147,29 +145,28 @@ echo "=========================================="
 echo "Step 5: Running Two-Stage Training (Optimized v5)"
 echo "=========================================="
 echo ""
-echo "Stage 1: Norman Continual Pretraining (up to 8 epochs, 40% subsample)"
-echo "  - Dataset: Norman Perturb-seq (K562, subsampled to ~44K cells)"
+echo "Stage 1: Norman Continual Pretraining (up to 10 epochs, 90% subsample)"
+echo "  - Dataset: Norman Perturb-seq (K562, subsampled to ~100K cells)"
 echo "  - Loss: MLM + MVC + ECS + DAR (perturbation as pseudo-batch)"
-echo "  - Learning Rate: 1.5e-4 with Cosine Annealing (eta_min=1e-6)"
-echo "  - Batch Size: 256, Gradient Accumulation: 2 steps (effective batch 512)"
-echo "  - HVGs: 2000 (capped by vocabulary match)"
-echo "  - DataLoader: Regular shuffled batching (2 workers)"
+echo "  - Learning Rate: 1.5e-4 (stable pretraining)"
+echo "  - Batch Size: 128, Gradient Accumulation: 2 steps (effective batch 256)"
+echo "  - HVGs: 1800 (more biological signal for better transfer)"
+echo "  - DataLoader Workers: 0 (in-process loading to avoid spawn issues)"
 echo "  - Early Stopping: patience=4, min_delta=5e-5"
-echo "  - Expected time: ~15-25 minutes"
+echo "  - Expected time: ~30-40 minutes"
 echo ""
-echo "Stage 2: PBMC 10K Integration Fine-tuning (35 epochs)"
+echo "Stage 2: PBMC 10K Integration Fine-tuning (30 epochs)"
 echo "  - Dataset: PBMC 10K (10 batches)"
 echo "  - Loss: MLM + MVC + ECS + DAR (batch labels)"
-echo "  - Learning Rate: 3e-5 with Cosine Annealing (eta_min=1e-6)"
+echo "  - Learning Rate: 3e-5 (stable fine-tuning for higher ARI)"
 echo "  - Batch Size: 128, Gradient Accumulation: 2 steps"
-echo "  - Optimizer: AdamW (weight_decay=1e-4)"
 echo "  - dab_weight: 0.3, ecs_thres: 0.3 (balanced batch correction)"
 echo "  - mask_ratio: 0.35 with cosine decay schedule (min 0.08 floor)"
-echo "  - HVGs: 2000 (capped by vocabulary match)"
-echo "  - DataLoader: 2 workers (parallel loading)"
-echo "  - Expected time: ~60-80 minutes"
+echo "  - HVGs: 1800 (more biological signal for better integration)"
+echo "  - DataLoader Workers: 0 (in-process loading)"
+echo "  - Expected time: ~50-60 minutes"
 echo ""
-echo "Expected total time: ~75-105 minutes (well within 2.5-hour limit)"
+echo "Expected total time: ~80-100 minutes (well within 3-hour limit)"
 echo ""
 
 # Record GPU memory before training
@@ -250,7 +247,7 @@ echo "=========================================="
 echo "Pipeline Complete!"
 echo "=========================================="
 echo ""
-echo "Expected improvements (with Norman continual pretraining + optimized batching):"
+echo "Expected improvements (with Norman continual pretraining + v6 optimizations):"
 echo "  - avg_bio:  0.68 -> 0.75~0.85"
 echo "  - ARI:      0.02 -> 0.50~0.70 (targeting significant improvement)"
 echo "  - NMI:      improved"

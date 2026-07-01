@@ -1,23 +1,18 @@
 #!/bin/bash
 # =============================================================================
-# scGPT Two-Stage Training Pipeline (Optimized v7)
-# Stage 1: Continual Pretraining on Norman Perturb-seq Data (up to 8 epochs, 40% subsample)
-# Stage 2: PBMC 10K Integration Fine-tuning (35 epochs)
+# scGPT Two-Stage Training Pipeline (Optimized v4)
+# Stage 1: Continual Pretraining on Norman Perturb-seq Data (8 epochs, 70% subsample)
+# Stage 2: PBMC 10K Integration Fine-tuning (20 epochs)
 #
-# Key changes from v6:
-#   - FIXED: UnboundLocalError in Tutorial_Integration.py line 1225 where norman_train_pt
-#     was deleted inside the for-loop (line 1186) then attempted to delete again after the
-#     loop exited. Added try/except UnboundLocalError for safe cleanup.
-#   - FIXED: Cosine Annealing LR scheduler replaces StepLR for both Norman and PBMC stages,
-#     providing smoother learning rate decay and better convergence.
-#   - FIXED: AdamW optimizer with weight_decay=1e-4 for better regularization.
-#   - Increased Stage 2 epochs 30->35 for more fine-tuning convergence.
-#   - norman_epochs 10->12, norman_patience 4->5 (more patient early stopping).
-#   - n_hvg 1800->2000 (more biological signal from HVGs).
-#   - norman_min_delta 5e-5->3e-5 (stricter early stopping criterion).
-#   - Best model tracking now includes avg_bio-based selection (not just val_loss),
-#     ensuring the final saved model optimizes the evaluation metric directly.
-#   - Added final evaluation on best avg_bio model with saved UMAP plots.
+# Key optimization changes from v3 (based on log analysis of 2026-06-30 run):
+#   - Reduced dab_weight 1.0->0.5, ecs_thres 0.8->0.5 (less aggressive batch correction)
+#   - Increased n_hvg 1200->1500, norman_n_hvg 1200->1500 (more biological signal)
+#   - Increased norman_epochs 6->8, subsample_ratio 0.5->0.7 (more pretraining data)
+#   - Added gradient accumulation (2 steps) for more stable training
+#   - Reduced mask_ratio 0.4->0.35 (easier learning with more observed tokens)
+#   - Reduced lr 1e-4->5e-5 for PBMC stage (stable fine-tuning)
+#   - Added spawn multiprocessing method to fix fork warnings
+#   - Increased epochs 15->20 for better convergence
 # =============================================================================
 
 set -e
@@ -127,49 +122,38 @@ mkdir -p "${PROJECT_ROOT}/data/norman"
 mkdir -p "${PROJECT_ROOT}/save"
 mkdir -p "${PROJECT_ROOT}/run_log"
 
-# Pre-cache the PBMC 10K dataset to avoid any DataLoader worker issues
-echo "Pre-caching PBMC 10K dataset..."
-python3 -u -c "
-import sys
-sys.path.insert(0, '${PROJECT_ROOT}')
-from scgpt.data import load_pbmc_dataset
-adata = load_pbmc_dataset(save_path='${PROJECT_ROOT}/data/pbmc10k', remove_extracted_data=False)
-print(f'PBMC 10K cached: {adata.shape[0]} cells x {adata.shape[1]} genes')
-" 2>&1 | tee -a "${PROJECT_ROOT}/run_log/precache_pbmc.log"
-
 echo "Data directories ready."
 
 # =============================================================================
-# 5. Run Two-Stage Training (Optimized v5)
+# 5. Run Two-Stage Training (Optimized v4)
 # =============================================================================
 echo ""
 echo "=========================================="
-echo "Step 5: Running Two-Stage Training (Optimized v5)"
+echo "Step 5: Running Two-Stage Training (Optimized v4)"
 echo "=========================================="
 echo ""
-echo "Stage 1: Norman Continual Pretraining (up to 8 epochs, 40% subsample)"
-echo "  - Dataset: Norman Perturb-seq (K562, subsampled to ~44K cells)"
+echo "Stage 1: Norman Continual Pretraining (up to 8 epochs, 70% subsample)"
+echo "  - Dataset: Norman Perturb-seq (K562, subsampled to ~78K cells)"
 echo "  - Loss: MLM + MVC + ECS + DAR (perturbation as pseudo-batch)"
-echo "  - Learning Rate: 1.5e-4 with Cosine Annealing (eta_min=1e-6)"
-echo "  - Batch Size: 256, Gradient Accumulation: 2 steps (effective batch 512)"
-echo "  - HVGs: 2000 (capped by vocabulary match)"
-echo "  - DataLoader: Regular shuffled batching (2 workers)"
-echo "  - Early Stopping: patience=4, min_delta=5e-5"
-echo "  - Expected time: ~15-25 minutes"
+echo "  - Learning Rate: 2e-4 (faster convergence)"
+echo "  - Batch Size: 128, Gradient Accumulation: 2 steps (effective batch 256)"
+echo "  - HVGs: 1500 (more biological signal)"
+echo "  - DataLoader Workers: 4, spawn multiprocessing"
+echo "  - Early Stopping: patience=3"
+echo "  - Expected time: ~20-25 minutes"
 echo ""
-echo "Stage 2: PBMC 10K Integration Fine-tuning (35 epochs)"
+echo "Stage 2: PBMC 10K Integration Fine-tuning (20 epochs)"
 echo "  - Dataset: PBMC 10K (10 batches)"
 echo "  - Loss: MLM + MVC + ECS + DAR (batch labels)"
-echo "  - Learning Rate: 3e-5 with Cosine Annealing (eta_min=1e-6)"
+echo "  - Learning Rate: 5e-5 (stable fine-tuning)"
 echo "  - Batch Size: 128, Gradient Accumulation: 2 steps"
-echo "  - Optimizer: AdamW (weight_decay=1e-4)"
-echo "  - dab_weight: 0.3, ecs_thres: 0.3 (balanced batch correction)"
-echo "  - mask_ratio: 0.35 with cosine decay schedule (min 0.08 floor)"
-echo "  - HVGs: 2000 (capped by vocabulary match)"
-echo "  - DataLoader: 2 workers (parallel loading)"
-echo "  - Expected time: ~60-80 minutes"
+echo "  - dab_weight: 0.5, ecs_thres: 0.5 (balanced batch correction)"
+echo "  - mask_ratio: 0.35 (more observed tokens)"
+echo "  - HVGs: 1500 (more biological signal)"
+echo "  - DataLoader Workers: 4"
+echo "  - Expected time: ~30-35 minutes"
 echo ""
-echo "Expected total time: ~75-105 minutes (well within 2.5-hour limit)"
+echo "Expected total time: ~50-60 minutes (well within 3-hour limit)"
 echo ""
 
 # Record GPU memory before training
@@ -250,9 +234,9 @@ echo "=========================================="
 echo "Pipeline Complete!"
 echo "=========================================="
 echo ""
-echo "Expected improvements (with Norman continual pretraining + optimized batching):"
-echo "  - avg_bio:  0.68 -> 0.75~0.85"
-echo "  - ARI:      0.02 -> 0.50~0.70 (targeting significant improvement)"
+echo "Expected improvements (with Norman continual pretraining):"
+echo "  - avg_bio:  0.68 -> 0.70~0.75"
+echo "  - ARI:      0.02 -> 0.35~0.55 (targeting significant improvement)"
 echo "  - NMI:      improved"
 echo "  - ASW_label: improved"
 echo ""

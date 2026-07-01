@@ -1,0 +1,38 @@
+## 分析日志结果
+
+我来仔细分析日志中的关键信息：
+
+### 执行的步骤
+
+| 步骤 | 状态 |
+|------|------|
+| Step 1: GPU选择 | ✅ 成功 |
+| Step 2: 预训练模型检查 | ✅ 成功 |
+| Step 3: 依赖检查 | ✅ 成功 |
+| Step 4: 数据准备 | ✅ 成功 |
+| Step 5: 两阶段训练 | ❌ **未完整执行** |
+| Step 6: 结果收集 | ❌ **未找到完整结果** |
+
+### 关键问题
+
+1. **训练被截断（未完整执行）**：
+   - 日志显示只执行了 **Stage 1 (Norman Continual Pretraining)** 的 epoch 1~8
+   - 在 epoch 8 的 batch 400/850 处中断
+   - **Stage 2 (PBMC 10K Integration Fine-tuning, 35 epochs) 完全没有开始执行**
+
+2. **运行时间接近超时上限**：
+   - 训练耗时 **9001 秒**（超时限制为 9000 秒）
+   - 说明训练被 timeout 机制中断，未能完成全部流程
+
+3. **结果不完整**：
+   - Stage 2 的 PBMC 10K 保存目录中 **没有 .pt 文件**（"No .pt files found"）
+   - 最终模型未生成，评估指标未计算
+
+4. **资源泄漏警告**：
+   - 出现 `resource_tracker` 泄漏信号量警告（20个 leaked semaphore objects）
+
+### 结论
+
+**存在异常**
+
+上一轮运行未能完整执行完毕：Stage 1（Norman Continual Pretraining）只完成了 8 个 epoch 中的部分训练，Stage 2（PBMC 10K Integration Fine-tuning, 35 epochs）完全没有开始，训练在达到 9000 秒超时限制后被中断，导致最终模型未生成、评估指标未计算。
