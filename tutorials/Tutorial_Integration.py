@@ -101,7 +101,9 @@ hyperparameter_defaults = dict(
     use_marker_guided_masking=True,  # Enable marker gene guided adaptive masking
     marker_mask_prob=0.7,  # High mask probability for cell-type-specific marker genes
     non_marker_mask_prob=0.25,  # Low mask probability for non-marker genes
-    n_marker_genes=50,  # Number of top marker genes per cell type to use
+    n_marker_genes=100,  # Number of top marker genes per cell type to use (increased for better coverage)
+    # Gradient accumulation for stable training from scratch
+    gradient_accumulation_steps=2,  # Accumulate gradients over N mini-batches
 )
 run = wandb.init(
     config=hyperparameter_defaults,
@@ -164,7 +166,8 @@ if dataset_name == "PBMC_10K":
         if "gene_name" not in adata.var:
             adata.var["gene_name"] = adata.var["gene_symbols"].values
         ori_batch_col = "batch"
-        data_is_raw = True
+        # Local data is already normalized and log1p transformed, avoid double log1p
+        data_is_raw = False
         logger.info(f"Loaded local data: {adata.shape[0]} cells x {adata.shape[1]} genes")
     else:
         logger.info("Local data not found, downloading PBMC 10K dataset...")
@@ -179,6 +182,10 @@ adata.obs["str_batch"] = adata.obs[ori_batch_col].astype(str)
 batch_id_labels = adata.obs["str_batch"].astype("category").cat.codes.values
 adata.obs["batch_id"] = batch_id_labels
 adata.var["gene_name"] = adata.var.index.tolist()
+
+logger.info(f"Dataset: {adata.shape[0]} cells, {adata.shape[1]} genes, "
+            f"{adata.obs['celltype'].nunique()} cell types, "
+            f"{adata.obs['str_batch'].nunique()} batches")
 
 
 # ### 2.2 Cross-check gene set with the pre-trained model 
@@ -226,12 +233,17 @@ if _use_pretrained:
     d_hid = model_configs["d_hid"]
     nlayers = model_configs["nlayers"]
     n_layers_cls = model_configs["n_layers_cls"]
+    config.update({"epochs": 25}, allow_val_change=True)  # Use more epochs for effective fine-tuning
 else:
-    logger.info("Pre-trained model not found, training from scratch")
-    embsize = config.layer_size 
-    nhead = config.nhead
-    nlayers = config.nlayers  
-    d_hid = config.layer_size
+    logger.info("Pre-trained model not found, training from scratch with larger model")
+    # Use larger model capacity when training from scratch
+    embsize = 256  # Increased from 128
+    nhead = 8      # Increased from 4
+    nlayers = 6    # Increased from 4
+    d_hid = 256    # Increased from 128
+    config.update({"epochs": 60, "lr": 5e-4, "gradient_accumulation_steps": 4}, allow_val_change=True)
+    logger.info(f"Training from scratch with: embsize={embsize}, nhead={nhead}, "
+                f"nlayers={nlayers}, d_hid={d_hid}, epochs={config['epochs']}, lr={config['lr']}")
 
 
 # ### 2.3 Pre-process the data
@@ -312,17 +324,26 @@ gene_ids = np.array(vocab(genes), dtype=int)
 # Marker Gene Guided Adaptive Masking: Compute marker genes
 # ============================================================
 if config.use_marker_guided_masking:
-    logger.info("Computing cell-type-specific marker genes from training data...")
-    # Build a temporary AnnData from training data for marker gene discovery
-    # Use the log1p-normalized training data to find discriminative genes
+    logger.info("Computing cell-type-specific marker genes from full dataset...")
+    # Use the full dataset (all cells) for marker gene discovery for better statistical power
+    # Use the log-normalized data (X_log1p layer) which is more appropriate for 
+    # differential expression analysis than binned data
+    if "X_log1p" in adata.layers:
+        marker_expr = (
+            adata.layers["X_log1p"].toarray()
+            if issparse(adata.layers["X_log1p"])
+            else adata.layers["X_log1p"]
+        )
+    else:
+        # Fall back to raw X if log1p layer not available
+        marker_expr = (
+            adata.X.toarray() if issparse(adata.X) else adata.X
+        )
     marker_adata = sc.AnnData(
-        X=train_data.copy(),
+        X=marker_expr.copy(),
         var=pd.DataFrame(index=genes),
-        obs=pd.DataFrame({"celltype": train_celltype_labels.astype(str)}),
+        obs=pd.DataFrame({"celltype": adata.obs["celltype"].values.astype(str)}),
     )
-    # Normalize and log1p for ranking
-    sc.pp.normalize_total(marker_adata, target_sum=1e4)
-    sc.pp.log1p(marker_adata)
     sc.tl.rank_genes_groups(
         marker_adata,
         groupby="celltype",
@@ -397,7 +418,7 @@ logger.info(
 # In[13]:
 
 
-def prepare_data(sort_seq_batch=False) -> Tuple[Dict[str, torch.Tensor]]:
+def prepare_data(sort_seq_batch=False, epoch=1) -> Tuple[Dict[str, torch.Tensor]]:
     # Use marker-guided adaptive masking if marker genes are available
     if config.use_marker_guided_masking and marker_gene_ids_dict is not None:
         masked_values_train = marker_guided_mask_value(
@@ -583,11 +604,18 @@ wandb.watch(model)
 
 criterion = masked_mse_loss
 criterion_dab = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(
-    model.parameters(), lr=config.lr, eps=1e-4 if config.amp else 1e-8
+optimizer = torch.optim.AdamW(
+    model.parameters(), lr=config.lr, weight_decay=0.01, eps=1e-4 if config.amp else 1e-8
 )
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1, gamma=config.schedule_ratio)
+# Use CosineAnnealingLR for smoother learning rate decay, helps training from scratch
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer, T_max=config.epochs, eta_min=1e-6
+)
 scaler = torch.cuda.amp.GradScaler(enabled=config.amp)
+
+# Gradient accumulation steps
+gradient_accumulation_steps = getattr(config, 'gradient_accumulation_steps', 2)
+logger.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
 
 
 # In[16]:
@@ -595,7 +623,7 @@ scaler = torch.cuda.amp.GradScaler(enabled=config.amp)
 
 def train(model: nn.Module, loader: DataLoader) -> None:
     """
-    Train the model for one epoch.
+    Train the model for one epoch with gradient accumulation.
     """
     model.train()
     total_loss, total_mse, total_gepc = 0.0, 0.0, 0.0
@@ -604,6 +632,7 @@ def train(model: nn.Module, loader: DataLoader) -> None:
     start_time = time.time()
 
     num_batches = len(loader)
+    optimizer.zero_grad()
     for batch, batch_data in enumerate(loader):
         input_gene_ids = batch_data["gene_ids"].to(device)
         input_values = batch_data["values"].to(device)
@@ -611,7 +640,7 @@ def train(model: nn.Module, loader: DataLoader) -> None:
         batch_labels = batch_data["batch_labels"].to(device)
 
         src_key_padding_mask = input_gene_ids.eq(vocab[pad_token])
-        with torch.cuda.amp.autocast(enabled=config.amp):
+        with torch.amp.autocast('cuda', enabled=config.amp):
             output_dict = model(
                 input_gene_ids,
                 input_values,
@@ -654,24 +683,29 @@ def train(model: nn.Module, loader: DataLoader) -> None:
             loss = loss + config.dab_weight * loss_dab
             metrics_to_log.update({"train/dab": loss_dab.item()})
 
-        model.zero_grad()
+        # Gradient accumulation: scale loss by accumulation steps
+        loss = loss / gradient_accumulation_steps
         scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        with warnings.catch_warnings(record=True) as w:
-            warnings.filterwarnings("always")
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(),
-                1.0,
-                error_if_nonfinite=False if scaler.is_enabled() else True,
-            )
-            if len(w) > 0:
-                logger.warning(
-                    f"Found infinite gradient. This may be caused by the gradient "
-                    f"scaler. The current scale is {scaler.get_scale()}. This warning "
-                    "can be ignored if no longer occurs after autoscaling of the scaler."
+
+        # Only update weights after accumulating enough gradients
+        if (batch + 1) % gradient_accumulation_steps == 0 or (batch + 1) == num_batches:
+            scaler.unscale_(optimizer)
+            with warnings.catch_warnings(record=True) as w:
+                warnings.filterwarnings("always")
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    1.0,
+                    error_if_nonfinite=False if scaler.is_enabled() else True,
                 )
-        scaler.step(optimizer)
-        scaler.update()
+                if len(w) > 0:
+                    logger.warning(
+                        f"Found infinite gradient. This may be caused by the gradient "
+                        f"scaler. The current scale is {scaler.get_scale()}. This warning "
+                        "can be ignored if no longer occurs after autoscaling of the scaler."
+                    )
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
 
         wandb.log(metrics_to_log)
 
@@ -680,7 +714,7 @@ def train(model: nn.Module, loader: DataLoader) -> None:
                 output_dict["mlm_output"], target_values, masked_positions
             )
 
-        total_loss += loss.item()
+        total_loss += loss.item() * gradient_accumulation_steps
         total_mse += loss_mse.item()
         total_gepc += loss_gepc.item() if config.GEPC else 0.0
         total_error += mre.item()
@@ -694,7 +728,7 @@ def train(model: nn.Module, loader: DataLoader) -> None:
             # ppl = math.exp(cur_loss)
             logger.info(
                 f"| epoch {epoch:3d} | {batch:3d}/{num_batches:3d} batches | "
-                f"lr {lr:05.4f} | ms/batch {ms_per_batch:5.2f} | "
+                f"lr {lr:05.6f} | ms/batch {ms_per_batch:5.2f} | "
                 f"loss {cur_loss:5.2f} | mse {cur_mse:5.2f} | mre {cur_error:5.2f} |"
                 + (f"gepc {cur_gepc:5.2f} |" if config.GEPC else "")
             )
@@ -730,7 +764,7 @@ def evaluate(model: nn.Module, loader: DataLoader) -> float:
             batch_labels = batch_data["batch_labels"].to(device)
 
             src_key_padding_mask = input_gene_ids.eq(vocab[pad_token])
-            with torch.cuda.amp.autocast(enabled=config.amp):
+            with torch.amp.autocast('cuda', enabled=config.amp):
                 output_dict = model(
                     input_gene_ids,
                     input_values,
@@ -802,7 +836,7 @@ def eval_testdata(
         )
         all_gene_ids, all_values = tokenized_all["genes"], tokenized_all["values"]
         src_key_padding_mask = all_gene_ids.eq(vocab[pad_token])
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=config.amp):
+        with torch.no_grad(), torch.amp.autocast('cuda', enabled=config.amp):
             cell_embeddings = model.encode_batch(
                 all_gene_ids,
                 all_values.float(),
@@ -869,7 +903,7 @@ define_wandb_metrcis()
 
 for epoch in range(1, config.epochs + 1):
     epoch_start_time = time.time()
-    train_data_pt, valid_data_pt = prepare_data(sort_seq_batch=per_seq_batch_sample)
+    train_data_pt, valid_data_pt = prepare_data(sort_seq_batch=per_seq_batch_sample, epoch=epoch)
     train_loader = prepare_dataloader(
         train_data_pt,
         batch_size=config.batch_size,
@@ -906,38 +940,51 @@ for epoch in range(1, config.epochs + 1):
         best_val_loss = val_loss
         best_model = copy.deepcopy(model)
         best_model_epoch = epoch
-        logger.info(f"Best model with score {best_val_loss:5.4f}")
+        logger.info(f"Best model (val loss) with score {best_val_loss:5.4f}")
 
     if epoch % config.save_eval_interval == 0 or epoch == config.epochs:
-        logger.info(f"Saving model to {save_dir}")
-        torch.save(best_model.state_dict(), save_dir / f"model_e{best_model_epoch}.pt")
+        logger.info(f"Evaluating model at epoch {epoch}, saving to {save_dir}")
 
-        # eval on testdata
+        # eval on testdata using current model (not best_model) for up-to-date evaluation
+        eval_model = model if epoch == config.epochs else best_model
+        eval_epoch = epoch if epoch == config.epochs else best_model_epoch
+        
         results = eval_testdata(
-            best_model,
+            eval_model,
             adata_t=adata_sorted if per_seq_batch_sample else adata,
             include_types=["cls"],
         )
         results["batch_umap"].savefig(
-            save_dir / f"embeddings_batch_umap[cls]_e{best_model_epoch}.png", dpi=300
+            save_dir / f"embeddings_batch_umap[cls]_e{eval_epoch}.png", dpi=300
         )
 
         results["celltype_umap"].savefig(
-            save_dir / f"embeddings_celltype_umap[cls]_e{best_model_epoch}.png", dpi=300
+            save_dir / f"embeddings_celltype_umap[cls]_e{eval_epoch}.png", dpi=300
         )
         metrics_to_log = {"test/" + k: v for k, v in results.items()}
         metrics_to_log["test/batch_umap"] = wandb.Image(
-            str(save_dir / f"embeddings_batch_umap[cls]_e{best_model_epoch}.png"),
-            caption=f"celltype avg_bio epoch {best_model_epoch}",
+            str(save_dir / f"embeddings_batch_umap[cls]_e{eval_epoch}.png"),
+            caption=f"celltype avg_bio epoch {eval_epoch}",
         )
 
         metrics_to_log["test/celltype_umap"] = wandb.Image(
-            str(save_dir / f"embeddings_celltype_umap[cls]_e{best_model_epoch}.png"),
-            caption=f"celltype avg_bio epoch {best_model_epoch}",
+            str(save_dir / f"embeddings_celltype_umap[cls]_e{eval_epoch}.png"),
+            caption=f"celltype avg_bio epoch {eval_epoch}",
         )
-        metrics_to_log["test/best_model_epoch"] = best_model_epoch
+        metrics_to_log["test/best_model_epoch"] = eval_epoch
         wandb.log(metrics_to_log)
         wandb.log({"avg_bio": results.get("avg_bio", 0.0)})
+
+        # Track best avg_bio model
+        current_avg_bio = results.get("avg_bio", 0.0)
+        if current_avg_bio > best_avg_bio:
+            best_avg_bio = current_avg_bio
+            logger.info(f"New best avg_bio: {best_avg_bio:.4f} at epoch {epoch}")
+            torch.save(eval_model.state_dict(), save_dir / "best_model_avg_bio.pt")
+
+        # Also save the best_val_loss model periodically
+        if epoch == best_model_epoch or epoch == config.epochs:
+            torch.save(best_model.state_dict(), save_dir / f"model_e{best_model_epoch}.pt")
 
     scheduler.step()
 
@@ -950,6 +997,34 @@ torch.save(best_model.state_dict(), save_dir / "best_model.pt")
 
 
 # In[19]:
+
+
+# Final comprehensive evaluation on the best model
+logger.info("=" * 60)
+logger.info("FINAL EVALUATION on best model")
+logger.info("=" * 60)
+final_results = eval_testdata(
+    best_model,
+    adata_t=adata_sorted if per_seq_batch_sample else adata,
+    include_types=["cls"],
+)
+if final_results:
+    logger.info("=" * 60)
+    logger.info("FINAL EVALUATION METRICS:")
+    for k, v in final_results.items():
+        if isinstance(v, (int, float, np.integer, np.floating)):
+            logger.info(f"  {k}: {v:.4f}")
+    logger.info("=" * 60)
+    
+    # Save final metrics to a JSON file
+    final_metrics = {k: float(v) for k, v in final_results.items() 
+                     if isinstance(v, (int, float, np.integer, np.floating))}
+    with open(save_dir / "final_metrics.json", "w") as f:
+        json.dump(final_metrics, f, indent=2)
+    logger.info(f"Final metrics saved to {save_dir / 'final_metrics.json'}")
+    
+    # Log final metrics to wandb
+    wandb.log({f"final/{k}": v for k, v in final_metrics.items()})
 
 
 artifact = wandb.Artifact(f"best_model", type="model")

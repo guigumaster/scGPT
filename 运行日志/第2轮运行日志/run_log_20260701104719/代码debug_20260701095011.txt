@@ -1,0 +1,66 @@
+让我先读取运行日志和关键代码文件，分析问题所在Now let me read the training script and key project files:
+
+I've identified the core issue. The error is clear:
+
+```
+wandb.sdk.lib.config_util.ConfigError: Attempted to change value of key "epochs" from 15 to 60
+```
+
+The code tries to modify `config.epochs` (and `config.lr`, `config.gradient_accumulation_steps`) after wandb has initialized, which fails. The fix is to use `config.update(allow_val_change=True)`.
+
+Let me also examine other potential issues in the code:
+
+Let me read the specific sections I need to modifyNow I have a clear picture of all the issues. Let me fix them:
+
+**Issue 1**: `config.epochs = 60`, `config.lr = 5e-4`, `config.gradient_accumulation_steps = 4`, `config.epochs = 25` all fail because wandb config is immutable after init.
+
+Let me fix the codeNow let me verify the fix and also check if the `train` and `evaluate` functions properly handle the `epoch` variable (which is referenced from enclosing scope):
+
+Good, the fix is in place. Now let me check the `train` and `evaluate` functions for the `epoch` variable reference (it's accessed from the enclosing scope):
+
+Good, the `epoch` variable is captured from the enclosing scope - this works in Python. Now let me verify the training loop code is soundThe fix looks correct. Now let me also verify the `gradient_accumulation_steps` variable is properly defined before the `train` function uses itThe code looks correct. Now let me execute the run script to verify it starts without errors. The training may take a while, but I'll check that it launches properly.
+
+The script is running successfully past the initial setup. Let me check the latest log output to see the training progressThe process is running (PID 1680984, using 148% CPU, 2GB RAM). Let me check the actual training logThe training is running successfully! The wandb ConfigError is fixed. Let me wait for the first epoch to start
+
+The training is running successfully! First epoch is progressing. Let me verify GPU usageTraining is running on GPU 1 (98% utilization, 7.3GB memory). Let me check the latest progress
+
+训练已成功运行！以下是完整的修改总结：
+
+---
+
+## 修改总结
+
+### 核心 Bug 修复
+
+**问题**：`Tutorial_Integration.py` 中 `config.epochs = 60`、`config.lr = 5e-4`、`config.gradient_accumulation_steps = 4` 等赋值操作导致 wandb ConfigError：
+
+```
+wandb.sdk.lib.config_util.ConfigError: Attempted to change value of key "epochs" from 15 to 60
+```
+
+**原因**：wandb 的 Config 对象在 `wandb.init()` 后默认不允许修改已存在的键值。
+
+**修复**：将 `config.xxx = yyy` 改为 `config.update({"key": value}, allow_val_change=True)`，并合并多个更新到一个 `config.update()` 调用中。
+
+### 修改文件
+
+**`tutorials/Tutorial_Integration.py`**（第 236-246 行）：
+
+| 修改前 | 修改后 |
+|--------|--------|
+| `config.epochs = 25` | `config.update({"epochs": 25}, allow_val_change=True)` |
+| `config.epochs = 60`<br>`config.lr = 5e-4`<br>`config.gradient_accumulation_steps = 4` | `config.update({"epochs": 60, "lr": 5e-4, "gradient_accumulation_steps": 4}, allow_val_change=True)` |
+
+### 运行验证
+
+训练已成功启动，当前状态：
+- ✅ **数据加载**：11989 cells × 3346 genes，9 种细胞类型，2 个批次
+- ✅ **模型初始化**：从头训练，embsize=256, nhead=8, nlayers=6, epochs=60, lr=0.0005
+- ✅ **标记基因检测**：459 个独特标记基因（9 种细胞类型各 100 个）
+- ✅ **梯度累积**：4 steps
+- ✅ **Epoch 1 完成**：valid loss=143.41，耗时 40.95s
+- ✅ **GPU 使用**：GPU 1，98% 利用率，7.3GB 显存
+
+预计总训练时间约 41 分钟。训练完成后会自动保存最佳模型和最终评估指标（包括 avg_bio/ARI 等 scIB 指标）。
+
+由于训练已无报错且正在正常进行，当前会话可以结束，后续训练会自动完成。

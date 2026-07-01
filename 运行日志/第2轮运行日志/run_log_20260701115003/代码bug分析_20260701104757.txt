@@ -1,0 +1,27 @@
+Let me continue reading the log to see if training completed fullyLet me check the end of the log file to see how it finished.
+
+Based on my thorough analysis of the log file, here is my conclusion:
+
+## 分析结果
+
+**结论: 存在异常**
+
+### 异常原因分析
+
+1. **训练未完整执行完毕（60个epoch仅完成55个）**
+   - run.sh 中配置的 Epochs 为 60
+   - 训练脚本日志显示 `epochs=60`
+   - 日志中训练进度仅到 **epoch 55**（完成了 epoch 55 的评估并输出了指标）
+   - **epoch 56-60 的训练记录完全缺失**
+
+2. **run.sh 后处理步骤未执行**
+   - run.sh 在训练完成后应有以下步骤输出：
+     - `===== 查找最佳模型 =====`
+     - `===== 训练结果汇总 =====`
+     - `===== 训练流程结束 =====`
+   - **这些输出在日志中完全不存在**，说明训练脚本退出后，run.sh 的后续流程未被执行
+
+3. **日志文件在 epoch 55 评估处戛然而止**，没有任何正常完成的标志性输出，也没有错误 traceback（说明进程被外部终止，如超时、OOM killer 等）
+
+### 其他说明（非关键异常，仅为警告/废弃信息）
+日志中存在大量 `DeprecationWarning` 和 `FutureWarning`，均为第三方库的废弃 API 警告，不影响运行，但属于代码质量问题。
