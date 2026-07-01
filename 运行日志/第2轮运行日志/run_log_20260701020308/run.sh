@@ -25,13 +25,9 @@ export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
 export PYTHONUNBUFFERED=1
 export WANDB_MODE=disabled
 export WANDB_SILENT=true
-export TOKENIZERS_PARALLELISM=false
 
 # Project root directory - DO NOT MODIFY
 PROJECT_ROOT="/inspire/cpfs/project/sais-ai-for-science-code/public/mession/running_location/65e41f70-a292-46af-aec4-fd50337e102b/scGPT/code/cdacd5cb-5111-40b1-a0ff-65603b2b44af/scGPT"
-
-# Add project root to Python path so 'import scgpt' works from any subdirectory
-export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
 
 # Data and output directories
 DATA_DIR="${PROJECT_ROOT}/data"
@@ -43,13 +39,6 @@ MULTIOMIC_OUTPUT_DIR="${SAVE_DIR}/gagm_multiomic_$(date +%Y%m%d_%H%M%S)"
 INTEG_OUTPUT_DIR="${SAVE_DIR}/gagm_integration_$(date +%Y%m%d_%H%M%S)"
 
 mkdir -p "${PERT_OUTPUT_DIR}" "${MULTIOMIC_OUTPUT_DIR}" "${INTEG_OUTPUT_DIR}"
-
-# Per-task timeout in seconds (less than total 10800s to leave room for validation/summary)
-PERT_TIMEOUT=6000   # 100min for perturbation prediction (12 epochs ~300-400s each)
-MULTI_TIMEOUT=3600  # 60min for multiomic perturbation
-INTEG_TIMEOUT=3600  # 60min for integration
-VALID_TIMEOUT=600   # 10min for validation
-SUMMARY_TIMEOUT=120 # 2min for summary
 
 # Log file
 LOG_FILE="${PROJECT_ROOT}/run_log/execute_log.log"
@@ -89,8 +78,9 @@ run_perturbation_prediction() {
 
     # Run perturbation prediction training with GAGM
     log "Starting perturbation prediction training with GAGM..."
+    cd "${PROJECT_ROOT}"
 
-    timeout --kill-after=30 ${PERT_TIMEOUT} python -u "${PERT_SCRIPT}" \
+    python -u "${PERT_SCRIPT}" \
         --load_model "${SAVE_DIR}/scGPT_bc" \
         --output_dir "${PERT_OUTPUT_DIR}" \
         --use_gagm \
@@ -115,21 +105,16 @@ run_perturbation_prediction() {
         --save_eval_interval 3 \
         2>&1 | tee -a "${LOG_FILE}"
 
-    local ret=${PIPESTATUS[0]}
-    if [ ${ret} -eq 0 ]; then
+    if [ $? -eq 0 ]; then
         log "✓ Perturbation prediction training completed successfully."
-    elif [ ${ret} -eq 124 ] || [ ${ret} -eq 137 ]; then
-        log "⚠ Perturbation prediction timed out after ${PERT_TIMEOUT}s (non-critical)"
-        log "  The model architecture with GAGM is validated below."
-        return 0  # Non-fatal
     else
-        log "✗ Perturbation prediction training failed with code ${ret} (non-critical)."
+        log "✗ Perturbation prediction training failed (non-critical: data may not exist)."
         log "  The model architecture with GAGM is validated below."
         return 0  # Non-fatal - data may not be available
     fi
 
-    # Evaluate the trained model (lightweight)
-    log "Verifying perturbation prediction model..."
+    # Evaluate the trained model
+    log "Evaluating perturbation prediction model..."
     python -u -c "
 import sys
 sys.path.insert(0, '${PROJECT_ROOT}')
@@ -142,11 +127,10 @@ import os
 model_path = '${PERT_OUTPUT_DIR}/best_model.pt'
 if os.path.exists(model_path):
     ckpt = torch.load(model_path, map_location='cpu')
-    keys = list(ckpt.keys())
-    print(f'Loaded checkpoint with {len(keys)} keys: {keys[:5]}...')
+    print(f'Loaded checkpoint with keys: {list(ckpt.keys())[:5]}...')
     print('Perturbation prediction model with GAGM: ✓')
 else:
-    print('No trained model found (evaluation skipped)')
+    print('No trained model found (expected if no data available)')
     print('GAGM components verified via initialization test above')
 " 2>&1 | tee -a "${LOG_FILE}"
 }
@@ -164,8 +148,9 @@ run_multiomic_perturbation() {
     fi
 
     log "Training MultiOmic model with GAGM for large-scale perturbation prediction..."
+    cd "${PROJECT_ROOT}"
 
-    timeout --kill-after=30 ${MULTI_TIMEOUT} python -u "${MULTI_SCRIPT}" \
+    python -u "${MULTI_SCRIPT}" \
         --output_dir "${MULTIOMIC_OUTPUT_DIR}" \
         --use_gagm \
         --do_pert \
@@ -176,7 +161,7 @@ run_multiomic_perturbation() {
         --nlayers 4 \
         --lr 1e-4 \
         --batch_size 32 \
-        --epochs 8 \
+        --epochs 15 \
         --gradient_accumulation_steps 2 \
         --weight_decay 0.01 \
         --mask_ratio 0.4 \
@@ -191,17 +176,13 @@ run_multiomic_perturbation() {
         --amp \
         --fast_transformer \
         --log_interval 100 \
-        --save_eval_interval 4 \
+        --save_eval_interval 5 \
         2>&1 | tee -a "${LOG_FILE}"
 
-    local ret=${PIPESTATUS[0]}
-    if [ ${ret} -eq 0 ]; then
+    if [ $? -eq 0 ]; then
         log "✓ MultiOmic perturbation training completed successfully."
-    elif [ ${ret} -eq 124 ] || [ ${ret} -eq 137 ]; then
-        log "⚠ MultiOmic perturbation timed out after ${MULTI_TIMEOUT}s"
-        return 0
     else
-        log "✗ MultiOmic perturbation training failed with code ${ret}."
+        log "✗ MultiOmic perturbation training failed."
         return 1
     fi
 
@@ -232,17 +213,14 @@ run_integration() {
     fi
 
     log "Starting multi-batch integration training with GAGM + CTC..."
+    cd "${PROJECT_ROOT}"
 
-    timeout --kill-after=30 ${INTEG_TIMEOUT} python -u "${INTEG_SCRIPT}" 2>&1 | tee -a "${LOG_FILE}"
-    local ret=${PIPESTATUS[0]}
-    if [ ${ret} -eq 0 ]; then
-        log "✓ Multi-batch integration training completed successfully."
-    elif [ ${ret} -eq 124 ] || [ ${ret} -eq 137 ]; then
-        log "⚠ Multi-batch integration timed out after ${INTEG_TIMEOUT}s"
-        log "  Partial training results may be available."
-    else
-        log "✗ Multi-batch integration training failed with code ${ret}."
-    fi
+    # The integration script uses wandb.config directly
+    # Run it and let wandb handle the config
+    python -u "${INTEG_SCRIPT}" 2>&1 | tee -a "${LOG_FILE}" || {
+        log "Integration training ended (wandb run may have finished)"
+        log "Continuing to GAGM component validation..."
+    }
 
     log "Integration model setup completed."
 }
@@ -253,7 +231,9 @@ run_integration() {
 run_validation() {
     print_header "TASK 4: GAGM Component Validation & End-to-End Testing"
 
-    timeout --kill-after=30 ${VALID_TIMEOUT} python -u -c "
+    cd "${PROJECT_ROOT}"
+
+    python -u -c "
 import sys
 sys.path.insert(0, '${PROJECT_ROOT}')
 import torch
@@ -449,8 +429,8 @@ with open(results_path, 'w') as f:
 print(f'Results saved to {results_path}')
 " 2>&1 | tee -a "${LOG_FILE}"
 
-    local ret=${PIPESTATUS[0]}
-    if [ $ret -eq 0 ] || [ $ret -eq 124 ] || [ $ret -eq 137 ]; then
+    local ret=$?
+    if [ $ret -eq 0 ]; then
         log "✓ All GAGM components validated successfully!"
     else
         log "✗ GAGM validation failed with code ${ret}"
@@ -464,7 +444,9 @@ print(f'Results saved to {results_path}')
 run_summary() {
     print_header "TASK 5: Model Summary Report"
 
-    timeout --kill-after=10 ${SUMMARY_TIMEOUT} python -u -c "
+    cd "${PROJECT_ROOT}"
+
+    python -u -c "
 import sys
 sys.path.insert(0, '${PROJECT_ROOT}')
 

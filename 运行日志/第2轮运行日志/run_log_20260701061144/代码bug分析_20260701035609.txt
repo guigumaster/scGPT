@@ -1,0 +1,32 @@
+## 分析结果
+
+通过完整阅读日志文件，可以确认上一轮运行**存在异常**。
+
+### 关键证据
+
+日志末尾的 Pipeline Summary 明确显示：
+
+```
+[2026-07-01 03:55:43]   Task 1: Perturbation Prediction:       ✓ DONE
+[2026-07-01 03:55:43]   Task 2: Large-scale MultiOmic:         ✗ FAILED
+[2026-07-01 03:55:43]   Task 3: Multi-batch Integration:       ✓ DONE
+[2026-07-01 03:55:43]   Task 4: GAGM Validation:               ✗ FAILED
+[2026-07-01 03:55:43]   Task 5: Summary Report:                ✓ DONE
+```
+
+**Task 2**（Large-scale MultiOmic Perturbation）和 **Task 4**（GAGM Validation）均以失败告终，错误完全一致：
+
+```
+IndexError: tensors used as indices must be long, int, byte or bool tensors
+```
+
+错误栈指向：
+- 文件：`scgpt/model/multiomic_model.py`，第 949 行
+- 代码：`scale = self.pert_scale[x]`
+- 根本原因：`pert_labels` 传入 `pert_encoder` 时数据类型不是 `long`/`int`/`byte`/`bool`，导致无法作为索引使用
+
+此外，Task 1（Perturbation Prediction）虽然标注为 `✓ DONE`，但实际上触发了 **3000s 超时**（日志中 `⚠ Perturbation prediction timed out after 3000s`），训练被迫中断，仅完成了 epoch 9 的部分训练，没有完整执行完毕。
+
+### 结论
+
+**存在异常**

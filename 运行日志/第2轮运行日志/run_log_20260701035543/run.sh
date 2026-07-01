@@ -45,9 +45,9 @@ INTEG_OUTPUT_DIR="${SAVE_DIR}/gagm_integration_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "${PERT_OUTPUT_DIR}" "${MULTIOMIC_OUTPUT_DIR}" "${INTEG_OUTPUT_DIR}"
 
 # Per-task timeout in seconds (less than total 10800s to leave room for validation/summary)
-PERT_TIMEOUT=6000   # 100min for perturbation prediction (12 epochs ~300-400s each)
-MULTI_TIMEOUT=3600  # 60min for multiomic perturbation
-INTEG_TIMEOUT=3600  # 60min for integration
+PERT_TIMEOUT=3000   # 50min for perturbation prediction
+MULTI_TIMEOUT=1800  # 30min for multiomic perturbation
+INTEG_TIMEOUT=2400  # 40min for integration
 VALID_TIMEOUT=600   # 10min for validation
 SUMMARY_TIMEOUT=120 # 2min for summary
 

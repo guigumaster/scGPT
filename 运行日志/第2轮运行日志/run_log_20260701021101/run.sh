@@ -30,9 +30,6 @@ export TOKENIZERS_PARALLELISM=false
 # Project root directory - DO NOT MODIFY
 PROJECT_ROOT="/inspire/cpfs/project/sais-ai-for-science-code/public/mession/running_location/65e41f70-a292-46af-aec4-fd50337e102b/scGPT/code/cdacd5cb-5111-40b1-a0ff-65603b2b44af/scGPT"
 
-# Add project root to Python path so 'import scgpt' works from any subdirectory
-export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
-
 # Data and output directories
 DATA_DIR="${PROJECT_ROOT}/data"
 SAVE_DIR="${PROJECT_ROOT}/save"
@@ -45,9 +42,9 @@ INTEG_OUTPUT_DIR="${SAVE_DIR}/gagm_integration_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "${PERT_OUTPUT_DIR}" "${MULTIOMIC_OUTPUT_DIR}" "${INTEG_OUTPUT_DIR}"
 
 # Per-task timeout in seconds (less than total 10800s to leave room for validation/summary)
-PERT_TIMEOUT=6000   # 100min for perturbation prediction (12 epochs ~300-400s each)
-MULTI_TIMEOUT=3600  # 60min for multiomic perturbation
-INTEG_TIMEOUT=3600  # 60min for integration
+PERT_TIMEOUT=3000   # 50min for perturbation prediction
+MULTI_TIMEOUT=1800  # 30min for multiomic perturbation
+INTEG_TIMEOUT=2400  # 40min for integration
 VALID_TIMEOUT=600   # 10min for validation
 SUMMARY_TIMEOUT=120 # 2min for summary
 

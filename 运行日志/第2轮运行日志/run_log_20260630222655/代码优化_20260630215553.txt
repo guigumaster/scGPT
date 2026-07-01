@@ -1,0 +1,29 @@
+Let me read the core model and training files to understand the current implementation thoroughlyNow let me read the fine-tuning scriptsLet me also read the multiomic model and the existing run.sh for reference:
+
+Now I have a thorough understanding of all the code. Let me implement the improvements systematically.
+
+## Analysis of Previous Issues
+
+From the previous test results, the key problems were:
+1. **Perturbation task**: `ctc_weight=0.0` (CTC loss never used), `use_gagm=False`, `do_pert=False`
+2. **Integration task**: `ctc_weight=0.05` too small, gate fusion needed improvement
+3. **Model**: GatedFusionEncoder lacked residual connection for better gradient flow
+
+Let me start implementing the fixes:
+
+### Step 1: Improve GAGM model components
+
+Let me check the file was correctly edited:
+
+I see the issue - missing return value. Let me fix it:
+
+Now let me improve the PerturbationEncoder with a learnable scale factorNow let me improve the CTC loss with configurable temperature in the forward pass:
+
+Now let me also improve the multiomic_model.py similarlyNow let me improve the CTC loss in `loss.py` with better numeric stability:
+
+Now let me update the integration script with better CTC weight and proper celltype handlingNow let me update the training function to ensure CTC loss and celltype_labels are properly passed:
+
+Now let me update the perturbation script to enable GAGM by default and properly use CTC:
+
+I need to fix the perturbation script - celltype_labels aren't being passed to the data loader. Let me also fix the sort_seq_batch handling:
+
