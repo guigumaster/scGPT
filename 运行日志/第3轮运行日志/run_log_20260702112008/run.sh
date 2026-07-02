@@ -39,12 +39,11 @@ export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export WANDB_SILENT="true"
 
-# Memory management - optimized for large models
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:256
+# Memory management
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:128
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 export NUMEXPR_NUM_THREADS=4
-export TORCH_CUDNN_V8_API_ENABLED=1
 
 # Use system Python (absolute path)
 PYTHON="/inspire/cpfs/project/sais-ai-for-science-code/public/conda/miniconda3/bin/python3"

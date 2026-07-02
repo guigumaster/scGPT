@@ -1,25 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
-# PCT-AIM v5: Unified Multi-task Training / Validation / Testing Pipeline
+# PCT-AIM v4: Unified Multi-task Training / Validation / Testing Pipeline
 # =============================================================================
-# KEY IMPROVEMENTS over v4:
-#   1. KILL rogue GPU processes before starting to prevent OOM
-#   2. Reduced batch_size from 32→16, increased grad_accum from 2→4 (same effective batch)
-#   3. Enabled gradient checkpointing + flash attention for memory efficiency
-#   4. Pipeline continues on task failure - other tasks still execute
-#   5. Gradient centralization for training stability
-#   6. Memory-efficient CCE (no double _encode call)
-#
-# KEY IMPROVEMENTS over v3 (inherited):
-#   1. Enhanced CCE (Contrastive Cell Embedding) with learnable temperature
-#   2. Enhanced PerturbationPredictor with residual connections
-#   3. Improved flag encoder and better initialization
-#   4. Better Similarity module with learnable temperature for CCE
+# KEY IMPROVEMENTS over v3:
+#   1. Enhanced CCE (Contrastive Cell Embedding) with learnable temperature - improves ARI/NMI
+#   2. Optimized training with reduced epochs and faster early stopping
+#   3. Enhanced PerturbationPredictor with residual connections
+#   4. Improved flag encoder and better initialization
+#   5. Optimized data pipeline (no redundant CUDA cache clearing between epochs)
+#   6. Better Similarity module with learnable temperature for CCE
 #
 # Tasks:
-#   1) Multi-batch Integration (PBMC 10K) - 25 epochs, CCE + ECS + DAB
-#   2) Perturbation Prediction (Norman 2019) - 25 epochs, CCE + pert predictor
-#   3) Large-scale Perturbation Prediction (Replogle 2022) - 15 epochs, CCE
+#   1) Multi-batch Integration (PBMC 10K) - 20 epochs, CCE + ECS + DAB
+#   2) Perturbation Prediction (Norman 2019) - 15 epochs, CCE + pert predictor
+#   3) Large-scale Perturbation Prediction (Replogle 2022) - 12 epochs, CCE
 #
 # Usage:
 #   bash run_log/run.sh [task] [mode]
@@ -39,14 +33,13 @@ export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export WANDB_SILENT="true"
 
-# Memory management - optimized for large models
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:256
+# Memory management
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:512
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 export NUMEXPR_NUM_THREADS=4
-export TORCH_CUDNN_V8_API_ENABLED=1
 
-# Use system Python (absolute path)
+# Use system Python
 PYTHON="/inspire/cpfs/project/sais-ai-for-science-code/public/conda/miniconda3/bin/python3"
 
 cd "${PROJECT_ROOT}"
@@ -65,50 +58,8 @@ log_error() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] $*" >&2; }
 
 cleanup_gpu() {
     log_info "Cleaning GPU memory..."
-    ${PYTHON} -c "
-import torch
-torch.cuda.empty_cache()
-import gc
-gc.collect()
-gc.collect()
-torch.cuda.synchronize()
-print('GPU memory cleaned')
-" 2>/dev/null || true
+    ${PYTHON} -c "import torch; torch.cuda.empty_cache(); import gc; gc.collect(); gc.collect(); print('GPU memory cleaned')" 2>/dev/null || true
     sleep 2
-}
-
-# KILL any leftover Python processes on this GPU that are not this script
-kill_rogue_gpu_processes() {
-    local my_pid=$$
-    log_info "Checking for rogue GPU processes..."
-    # Get all Python processes using GPU 0
-    local rogue_pids
-    rogue_pids=$(${PYTHON} -c "
-import subprocess, os
-result = subprocess.run(['nvidia-smi', '--query-compute-apps=pid,used_memory', '--format=csv,noheader'], 
-                       capture_output=True, text=True, timeout=10)
-for line in result.stdout.strip().split('\n'):
-    if not line.strip():
-        continue
-    parts = line.split(',')
-    if len(parts) >= 2:
-        pid = parts[0].strip()
-        mem = parts[1].strip().replace('MiB', '').strip()
-        try:
-            if int(mem) > 100 and pid != str($$):
-                print(pid)
-        except ValueError:
-            pass
-" 2>/dev/null || true)
-    for pid in $rogue_pids; do
-        if [ -n "$pid" ] && [ "$pid" != "$$" ] && [ "$pid" != "" ]; then
-            log_info "Killing rogue process PID=$pid"
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-    done
-    sleep 2
-    cleanup_gpu
-    log_info "GPU process cleanup complete."
 }
 
 run_python() {
@@ -121,8 +72,8 @@ run_python() {
     ${PYTHON} -c "
 import torch
 if torch.cuda.is_available():
-    free_mem, total_mem = torch.cuda.mem_get_info()
-    print(f'GPU free memory before: {free_mem / 1024**3:.1f} GB / {total_mem / 1024**3:.1f} GB')
+    free_mem = torch.cuda.mem_get_info()[0] / 1024**3
+    print(f'GPU free memory before: {free_mem:.1f} GB')
     torch.cuda.empty_cache()
 import gc; gc.collect()
 " 2>/dev/null || true
@@ -160,16 +111,38 @@ check_save_dir() {
     return 0
 }
 
-# ----------------------------- Task 1: Perturbation Prediction (v5 optimized) -----------------
+# ----------------------------- Task 1: Perturbation Prediction (v4 optimized) -----------------
 PERTURBATION_SCRIPT="${PROJECT_ROOT}/data/finetune_perturbation_pctaim.py"
 
 train_perturbation() {
-    log_info "=== PCT-AIM v5: Training Perturbation Prediction (Norman 2019) ==="
+    log_info "=== PCT-AIM v4: Training Perturbation Prediction (Norman 2019) ==="
     cleanup_gpu
-    # v5: all hyperparams now in the Python file with defaults, only override what's needed
+    # v4 optimizations: CCE=True, reduced epochs, faster early stopping
     run_python "${PERTURBATION_SCRIPT}" \
         "--seed=42" \
         "--do_train=True" \
+        "--epochs=15" \
+        "--batch_size=32" \
+        "--layer_size=512" \
+        "--nlayers=12" \
+        "--nhead=8" \
+        "--d_hid=512" \
+        "--dropout=0.15" \
+        "--lr=5e-5" \
+        "--mask_ratio=0.4" \
+        "--gradient_accumulation_steps=2" \
+        "--use_cosine_scheduler=True" \
+        "--warmup_epochs=3" \
+        "--early_stopping_patience=5" \
+        "--weight_decay=0.01" \
+        "--fast_transformer=False" \
+        "--pre_norm=True" \
+        "--amp=True" \
+        "--use_pert_cond=True" \
+        "--pert_per_gene=False" \
+        "--task_type=perturbation" \
+        "--CCE=True" \
+        "--dab_weight=1.0" \
         "--load_model=${PROJECT_ROOT}/save/scGPT_human" \
         "--num_workers=0"
     local ret=$?
@@ -180,7 +153,7 @@ train_perturbation() {
 }
 
 eval_perturbation() {
-    log_info "=== PCT-AIM v5: Evaluating Perturbation Prediction ==="
+    log_info "=== PCT-AIM v3: Evaluating Perturbation Prediction ==="
     local save_dir="${PERTURBATION_SAVE_DIR}"
     [ -z "${save_dir}" ] && save_dir=$(find_latest_save_dir "dev_norman_pctaim")
     check_save_dir "${save_dir}" "Perturbation" || return 1
@@ -193,16 +166,39 @@ eval_perturbation() {
     return ${ret}
 }
 
-# ----------------------------- Task 2: Multi-batch Integration (v5 optimized) ----------------
+# ----------------------------- Task 2: Multi-batch Integration (v4 optimized) ----------------
 INTEGRATION_SCRIPT="${PROJECT_ROOT}/data/finetune_integration_pctaim.py"
 
 train_integration() {
-    log_info "=== PCT-AIM v5: Training Multi-batch Integration (PBMC 10K) ==="
+    log_info "=== PCT-AIM v4: Training Multi-batch Integration (PBMC 10K) ==="
     cleanup_gpu
-    # v5: all hyperparams now in the Python file with defaults, only override what's needed
+    # v4 optimizations: CCE=True, ECS=0.8, dab_weight=2.0, reduced epochs
     run_python "${INTEGRATION_SCRIPT}" \
         "--seed=42" \
         "--do_train=True" \
+        "--epochs=20" \
+        "--batch_size=32" \
+        "--layer_size=512" \
+        "--nlayers=12" \
+        "--nhead=8" \
+        "--d_hid=512" \
+        "--dropout=0.15" \
+        "--lr=1e-4" \
+        "--mask_ratio=0.4" \
+        "--gradient_accumulation_steps=2" \
+        "--use_cosine_scheduler=True" \
+        "--warmup_epochs=2" \
+        "--early_stopping_patience=6" \
+        "--weight_decay=0.01" \
+        "--ecs_thres=0.8" \
+        "--dab_weight=2.0" \
+        "--fast_transformer=False" \
+        "--pre_norm=True" \
+        "--amp=True" \
+        "--use_pert_cond=False" \
+        "--use_cross_modal=False" \
+        "--task_type=integration" \
+        "--CCE=True" \
         "--load_model=${PROJECT_ROOT}/save/scGPT_human" \
         "--num_workers=0"
     local ret=$?
@@ -213,7 +209,7 @@ train_integration() {
 }
 
 eval_integration() {
-    log_info "=== PCT-AIM v5: Evaluating Integration ==="
+    log_info "=== PCT-AIM v3: Evaluating Integration ==="
     local save_dir="${INTEGRATION_SAVE_DIR}"
     [ -z "${save_dir}" ] && save_dir=$(find_latest_save_dir "dev_PBMC_10K_PCTAIM")
     check_save_dir "${save_dir}" "Integration" || return 1
@@ -226,16 +222,38 @@ eval_integration() {
     return ${ret}
 }
 
-# ----------------------------- Task 3: Large-scale Perturbation (v5 optimized) --------------
+# ----------------------------- Task 3: Large-scale Perturbation (v4 optimized) --------------
 REPLOGLE_SCRIPT="${PROJECT_ROOT}/data/finetune_replogle_pctaim.py"
 
 train_replogle() {
-    log_info "=== PCT-AIM v5: Training Large-scale Perturbation (Replogle 2022) ==="
+    log_info "=== PCT-AIM v4: Training Large-scale Perturbation (Replogle 2022) ==="
     cleanup_gpu
-    # v5: all hyperparams now in the Python file with defaults, only override what's needed
+    # v4 optimizations: CCE=True, reduced epochs, faster early stopping
     run_python "${REPLOGLE_SCRIPT}" \
         "--seed=42" \
         "--do_train=True" \
+        "--epochs=12" \
+        "--batch_size=32" \
+        "--layer_size=512" \
+        "--nlayers=12" \
+        "--nhead=8" \
+        "--d_hid=512" \
+        "--dropout=0.2" \
+        "--lr=5e-5" \
+        "--mask_ratio=0.35" \
+        "--gradient_accumulation_steps=2" \
+        "--use_cosine_scheduler=True" \
+        "--warmup_epochs=2" \
+        "--early_stopping_patience=5" \
+        "--weight_decay=0.01" \
+        "--dab_weight=0.5" \
+        "--fast_transformer=False" \
+        "--pre_norm=True" \
+        "--amp=True" \
+        "--use_pert_cond=True" \
+        "--pert_per_gene=False" \
+        "--task_type=large_perturbation" \
+        "--CCE=True" \
         "--load_model=${PROJECT_ROOT}/save/scGPT_human" \
         "--num_workers=0"
     local ret=$?
@@ -246,7 +264,7 @@ train_replogle() {
 }
 
 eval_replogle() {
-    log_info "=== PCT-AIM v5: Evaluating Large-scale Perturbation ==="
+    log_info "=== PCT-AIM v3: Evaluating Large-scale Perturbation ==="
     local save_dir="${REPLOGLE_SAVE_DIR}"
     [ -z "${save_dir}" ] && save_dir=$(find_latest_save_dir "dev_replogle_pctaim")
     check_save_dir "${save_dir}" "Replogle" || return 1
@@ -300,10 +318,10 @@ print('All modules OK')
 # ----------------------------- Summary Report --------------------------------
 generate_report() {
     log_info "=== Generating Training Summary Report ==="
-    local report_file="${PROJECT_ROOT}/run_log/training_report_v5.txt"
+    local report_file="${PROJECT_ROOT}/run_log/training_report_v4.txt"
     {
         echo "=========================================="
-        echo "PCT-AIM v5 Training Report"
+        echo "PCT-AIM v3 Training Report"
         echo "Generated: $(date)"
         echo "=========================================="
         echo ""
@@ -326,24 +344,19 @@ generate_report() {
 
 # ----------------------------- Main Dispatcher --------------------------------
 main() {
-    # Kill any rogue GPU processes first
-    kill_rogue_gpu_processes
-    
     setup_environment
 
-    local has_errors=0
+    local overall_exit=0
 
     case "${TASK}" in
         perturbation)
             case "${MODE}" in
-                train) train_perturbation; has_errors=$? ;;
-                eval)  eval_perturbation; has_errors=$? ;;
+                train) train_perturbation; overall_exit=$? ;;
+                eval)  eval_perturbation; overall_exit=$? ;;
                 all)
-                    train_perturbation; local t1=$?
-                    if [ $t1 -eq 0 ]; then
-                        eval_perturbation; has_errors=$?
-                    else
-                        has_errors=$t1
+                    train_perturbation; overall_exit=$?
+                    if [ $overall_exit -eq 0 ]; then
+                        eval_perturbation; overall_exit=$?
                     fi
                     ;;
                 *)
@@ -354,14 +367,12 @@ main() {
             ;;
         integration)
             case "${MODE}" in
-                train) train_integration; has_errors=$? ;;
-                eval)  eval_integration; has_errors=$? ;;
+                train) train_integration; overall_exit=$? ;;
+                eval)  eval_integration; overall_exit=$? ;;
                 all)
-                    train_integration; local t1=$?
-                    if [ $t1 -eq 0 ]; then
-                        eval_integration; has_errors=$?
-                    else
-                        has_errors=$t1
+                    train_integration; overall_exit=$?
+                    if [ $overall_exit -eq 0 ]; then
+                        eval_integration; overall_exit=$?
                     fi
                     ;;
                 *)
@@ -372,14 +383,12 @@ main() {
             ;;
         replogle)
             case "${MODE}" in
-                train) train_replogle; has_errors=$? ;;
-                eval)  eval_replogle; has_errors=$? ;;
+                train) train_replogle; overall_exit=$? ;;
+                eval)  eval_replogle; overall_exit=$? ;;
                 all)
-                    train_replogle; local t1=$?
-                    if [ $t1 -eq 0 ]; then
-                        eval_replogle; has_errors=$?
-                    else
-                        has_errors=$t1
+                    train_replogle; overall_exit=$?
+                    if [ $overall_exit -eq 0 ]; then
+                        eval_replogle; overall_exit=$?
                     fi
                     ;;
                 *)
@@ -389,41 +398,30 @@ main() {
             esac
             ;;
         all)
-            log_info "=== PCT-AIM v5: Running FULL pipeline for ALL tasks ==="
-            
-            # Train all tasks - each is independent, continue even if one fails
-            log_info "--- Task 1/3: Multi-batch Integration (PBMC 10K) ---"
-            train_integration; local i1=$?
-            if [ $i1 -ne 0 ]; then
-                log_error "Integration training failed, but continuing with other tasks..."
-                has_errors=1
-            fi
+            log_info "=== PCT-AIM v4: Running FULL pipeline for ALL tasks ==="
+            # Train integration first (most critical task)
+            train_integration; overall_exit=$?
             cleanup_gpu
-            
-            log_info "--- Task 2/3: Perturbation Prediction (Norman 2019) ---"
-            train_perturbation; local i2=$?
-            if [ $i2 -ne 0 ]; then
-                log_error "Perturbation training failed, but continuing with other tasks..."
-                has_errors=1
+            if [ $overall_exit -eq 0 ]; then
+                train_perturbation; overall_exit=$?
+                cleanup_gpu
             fi
-            cleanup_gpu
-            
-            log_info "--- Task 3/3: Large-scale Perturbation (Replogle 2022) ---"
-            train_replogle; local i3=$?
-            if [ $i3 -ne 0 ]; then
-                log_error "Replogle training failed."
-                has_errors=1
+            if [ $overall_exit -eq 0 ]; then
+                train_replogle; overall_exit=$?
+                cleanup_gpu
             fi
-            cleanup_gpu
-            
-            # Evaluate all - each is independent
-            log_info "--- Evaluating all tasks ---"
-            eval_integration || true
-            eval_perturbation || true
-            eval_replogle || true
-            
+            # Evaluate all
+            if [ $overall_exit -eq 0 ]; then
+                eval_integration || true
+            fi
+            if [ $overall_exit -eq 0 ]; then
+                eval_perturbation || true
+            fi
+            if [ $overall_exit -eq 0 ]; then
+                eval_replogle || true
+            fi
             generate_report
-            log_info "=== PCT-AIM v5 FULL pipeline complete ==="
+            log_info "=== PCT-AIM v4 FULL pipeline complete ==="
             ;;
         *)
             log_error "Unknown task: ${TASK}. Use: perturbation, integration, replogle, all"
@@ -431,12 +429,12 @@ main() {
             ;;
     esac
 
-    if [ $has_errors -ne 0 ]; then
-        log_error "Pipeline completed with errors (exit code ${has_errors})."
+    if [ $overall_exit -ne 0 ]; then
+        log_error "Pipeline completed with errors (exit code ${overall_exit})."
     else
         log_info "All tasks completed successfully!"
     fi
-    exit $has_errors
+    exit $overall_exit
 }
 
 # ----------------------------- Entry Point -----------------------------------

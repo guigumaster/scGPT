@@ -1,0 +1,19 @@
+Let me explore the project structure and examine the Python scripts.
+
+Let me read the key Python scripts to understand the current configurationLet me look at the other task scripts and the model architectureLet me also check the model architecture and the integration script more fullyNow I have a comprehensive understanding of the code. Let me check the full integration script to see its training loop:
+
+Now I have a thorough understanding of the entire codebase. Let me implement the optimization plan.
+
+**Key issues identified:**
+1. `prepare_data()` re-random-masks the entire dataset EVERY epoch - huge waste
+2. Batch size (16) is too small for this GPU setup, leading to too many batches/epoch  
+3. Too many epochs given the 3-hour time budget for all 3 tasks
+4. `num_workers=0` causes slow data loading
+
+Let me create the optimized codeNow let me implement the changes. I'll create a shared masking dataset utility, then modify all three task scripts and the run.sh.
+
+Now let me implement the solution. I'll make the following changes:
+
+1. Create a shared on-the-fly masking dataset utility
+2. Optimize all 3 task scripts
+3. Update run.shNow let me make the targeted edits to the perturbation script. First, update the hyperparameters

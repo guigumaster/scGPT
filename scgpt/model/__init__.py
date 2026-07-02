@@ -14,6 +14,7 @@ from .pctaim_model import (
     CrossModalFusionLayer,
     task_adaptive_mask_value,
     PerturbationPredictor,
+    EnhancedAdversarialDiscriminator,
 )
 from .dsbn import *
 from .grad_reverse import *

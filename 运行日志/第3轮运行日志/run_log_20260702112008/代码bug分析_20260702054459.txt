@@ -1,0 +1,19 @@
+## 分析结果
+
+经过对 `execute_log.log` 的详细分析，发现以下问题：
+
+**严重错误：CUDA Out of Memory (OOM)**
+
+```
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 114.00 MiB. 
+GPU 0 has a total capacity of 95.08 GiB of which 100.56 MiB is free.
+Process 856555 has 80.89 GiB memory in use.
+```
+
+运行日志清晰地显示：
+1. **Multi-batch Integration (PBMC 10K) 训练任务在执行过程中触发 `torch.OutOfMemoryError`**
+2. **命令以 exit code 1 失败退出**
+3. 由于该任务失败，后续的 **Perturbation Prediction (Norman 2019)** 和 **Large-scale Perturbation (Replogle 2022)** 任务被跳过，**未执行**
+4. 最终日志输出 `[ERROR] Pipeline completed with errors (exit code 1)`，确认整个管道未完整执行完毕
+
+**结论：存在异常**
